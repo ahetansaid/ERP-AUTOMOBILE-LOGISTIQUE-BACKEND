@@ -9,6 +9,20 @@ import clientsRoutes from './routes/clients.js';
 import dashboardRoutes from './routes/dashboard.js';
 import transitRoutes from './routes/transit.js';
 import reportingRoutes from './routes/reporting.js';
+import documentsRoutes from './routes/documents.js';
+import chargesRoutes from './routes/charges.js';
+import transitStepsRoutes from './routes/transitSteps.js';
+import proformasRoutes from './routes/proformas.js';
+import invoicesRoutes from './routes/invoices.js';
+import paymentsRoutes from './routes/payments.js';
+import treasuryRoutes from './routes/treasury.js';
+import chargesListRoutes from './routes/chargesList.js';
+import stockRoutes from './routes/stock.js';
+import companyInfoRoutes from './routes/companyInfo.js';
+import receiptsRoutes from './routes/receipts.js';
+import transitOperationsRoutes from './routes/transitOperations.js';
+import purchasesRoutes from './routes/purchases.js';
+import devisRoutes from './routes/devis.js';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -31,13 +45,27 @@ app.get('/api/ping-db', async (req, res) => {
   }
 });
 
-// Routes métier (conformes au rapport API frontend)
+// Routes métier (sous-routes véhicules avant /vehicles/:id)
 app.use('/auth', authRoutes);
+app.use('/vehicles', documentsRoutes);
+app.use('/vehicles', chargesRoutes);
+app.use('/vehicles', transitStepsRoutes);
+app.use('/vehicles', proformasRoutes);
+app.use('/vehicles', stockRoutes);
 app.use('/vehicles', vehiclesRoutes);
 app.use('/clients', clientsRoutes);
 app.use('/dashboard', dashboardRoutes);
+app.use('/transit', transitOperationsRoutes);
 app.use('/transit', transitRoutes);
+app.use('/company-info', companyInfoRoutes);
+app.use('/receipts', receiptsRoutes);
+app.use('/purchases', purchasesRoutes);
+app.use('/devis', devisRoutes);
 app.use('/reporting', reportingRoutes);
+app.use('/charges', chargesListRoutes);
+app.use('/invoices', invoicesRoutes);
+app.use('/payments', paymentsRoutes);
+app.use('/treasury', treasuryRoutes);
 
 // 404
 app.use((req, res) => {

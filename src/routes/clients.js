@@ -46,7 +46,26 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// GET /clients/:id
+// GET /clients/export — liste complète pour export PDF/Excel (format=json par défaut)
+router.get('/export', async (req, res, next) => {
+  try {
+    const { format } = req.query;
+    const [rows] = await pool.execute('SELECT * FROM clients ORDER BY name ASC');
+    const data = rows.map(toClientRow);
+    if (format === 'csv') {
+      const header = 'id;name;email;phone;address;createdAt\n';
+      const lines = data.map((c) => `${c.id};${(c.name || '').replace(/;/g, ',')};${c.email || ''};${c.phone || ''};${(c.address || '').replace(/;/g, ',')};${c.createdAt || ''}`).join('\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename=clients.csv');
+      return res.send('\uFEFF' + header + lines);
+    }
+    res.status(200).json({ data, total: data.length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /clients/:id — détail + opérations liées (véhicules, factures, paiements, opérations transit)
 router.get('/:id', async (req, res, next) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -70,6 +89,49 @@ router.get('/:id', async (req, res, next) => {
       model: v.model,
       year: v.year,
       status: v.status,
+    }));
+    const vehicleIds = vehiclesRows.map((v) => v.id);
+    if (vehicleIds.length > 0) {
+      const placeholders = vehicleIds.map(() => '?').join(',');
+      const [invRows] = await pool.execute(
+        `SELECT id, vehicle_id, amount, status, created_at FROM invoices WHERE vehicle_id IN (${placeholders}) ORDER BY created_at DESC`,
+        vehicleIds
+      );
+      client.invoices = invRows.map((i) => ({
+        id: String(i.id),
+        vehicleId: String(i.vehicle_id),
+        amount: i.amount != null ? Number(i.amount) : null,
+        status: i.status,
+        createdAt: i.created_at,
+      }));
+      const [payRows] = await pool.execute(
+        `SELECT p.id, p.amount, p.payment_type, p.paid_at, p.invoice_id, p.vehicle_id FROM payments p
+         WHERE p.vehicle_id IN (${placeholders}) OR p.invoice_id IN (SELECT id FROM invoices WHERE vehicle_id IN (${placeholders})) ORDER BY p.paid_at DESC`,
+        [...vehicleIds, ...vehicleIds]
+      );
+      client.payments = payRows.map((p) => ({
+        id: String(p.id),
+        amount: Number(p.amount),
+        paymentType: p.payment_type,
+        paidAt: p.paid_at,
+        invoiceId: p.invoice_id != null ? String(p.invoice_id) : null,
+        vehicleId: p.vehicle_id != null ? String(p.vehicle_id) : null,
+      }));
+    } else {
+      client.invoices = [];
+      client.payments = [];
+    }
+    const [transitRows] = await pool.execute(
+      'SELECT id, operation_type, reference, bl_number, date_arrivee_port, created_at FROM transit_operations WHERE client_id = ? ORDER BY created_at DESC',
+      [id]
+    );
+    client.transitOperations = transitRows.map((t) => ({
+      id: String(t.id),
+      operationType: t.operation_type,
+      reference: t.reference,
+      blNumber: t.bl_number,
+      dateArriveePort: t.date_arrivee_port,
+      createdAt: t.created_at,
     }));
     res.status(200).json(client);
   } catch (err) {

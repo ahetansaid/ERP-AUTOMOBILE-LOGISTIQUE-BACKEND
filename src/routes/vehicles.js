@@ -14,6 +14,7 @@ function toVehicleRow(row, clientName = null) {
     brand: row.brand,
     model: row.model,
     year: row.year,
+    color: row.color ?? null,
     vehicleType: row.vehicle_type ?? null,
     status: row.status,
     clientId: row.client_id != null ? String(row.client_id) : null,
@@ -21,14 +22,24 @@ function toVehicleRow(row, clientName = null) {
     purchasePrice: row.purchase_price != null ? Number(row.purchase_price) : null,
     salePrice: row.sale_price != null ? Number(row.sale_price) : null,
     currency: row.currency ?? null,
+    purchaseId: row.purchase_id != null ? String(row.purchase_id) : null,
+    dateEntreePort: row.date_entree_port ?? null,
+    dateEntreeParc: row.date_entree_parc ?? null,
+    numeroBl: row.numero_bl ?? null,
+    natureStock: row.nature_stock ?? null,
+    regularise: row.regularise != null ? Boolean(row.regularise) : false,
+    inMaintenance: row.in_maintenance != null ? Boolean(row.in_maintenance) : false,
+    maintenancePrestataire: row.maintenance_prestataire ?? null,
+    maintenanceDevis: row.maintenance_devis ?? null,
+    accidente: row.accidente != null ? Boolean(row.accidente) : false,
     createdAt: row.created_at,
   };
 }
 
-// GET /vehicles — liste avec filtres search, status, page, limit
+// GET /vehicles — liste avec filtres search, status, inMaintenance, page, limit
 router.get('/', async (req, res, next) => {
   try {
-    const { search, status, page = 1, limit = 20 } = req.query;
+    const { search, status, inMaintenance, page = 1, limit = 20 } = req.query;
     const offset = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, Math.min(100, parseInt(limit, 10)));
     const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10)));
 
@@ -42,6 +53,9 @@ router.get('/', async (req, res, next) => {
     if (status && VEHICLE_STATUSES.includes(status)) {
       where.push('v.status = ?');
       params.push(status);
+    }
+    if (inMaintenance === '1' || inMaintenance === 'true') {
+      where.push('v.in_maintenance = 1');
     }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -247,23 +261,28 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// POST /vehicles
+// POST /vehicles — optionnel : purchaseId (lien achat), purchasePrice, currency (préremplis depuis un achat)
 router.post('/', async (req, res, next) => {
   try {
-    const { vin, chassisNumber, brand, model, year, vehicleType } = req.body;
+    const { vin, chassisNumber, brand, model, year, color, vehicleType, purchaseId, purchasePrice, currency } = req.body;
     if (!vin || !brand || !model || year == null) {
       return res.status(400).json({ message: 'vin, brand, model et year sont requis', statusCode: 400 });
     }
+    const pid = purchaseId != null && purchaseId !== '' ? parseInt(purchaseId, 10) : null;
     const [result] = await pool.execute(
-      `INSERT INTO vehicles (vin, chassis_number, brand, model, year, vehicle_type)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO vehicles (vin, chassis_number, brand, model, year, color, vehicle_type, purchase_id, purchase_price, currency)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         String(vin).trim(),
         chassisNumber ? String(chassisNumber).trim() : null,
         String(brand).trim(),
         String(model).trim(),
         parseInt(year, 10),
+        color ? String(color).trim() : null,
         vehicleType ? String(vehicleType).trim() : null,
+        pid && !Number.isNaN(pid) ? pid : null,
+        purchasePrice != null ? Number(purchasePrice) : null,
+        currency ? String(currency).trim() : null,
       ]
     );
     const [rows] = await pool.execute(
@@ -292,8 +311,10 @@ router.patch('/:id', async (req, res, next) => {
       return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
     }
     const allowed = [
-      'chassisNumber', 'brand', 'model', 'year', 'vehicleType', 'status', 'clientId',
-      'purchasePrice', 'salePrice', 'currency',
+      'chassisNumber', 'brand', 'model', 'year', 'color', 'vehicleType', 'status', 'clientId',
+      'purchasePrice', 'salePrice', 'currency', 'purchaseId',
+      'dateEntreePort', 'dateEntreeParc', 'numeroBl', 'natureStock', 'regularise',
+      'inMaintenance', 'maintenancePrestataire', 'maintenanceDevis', 'accidente',
     ];
     const dbMap = {
       chassisNumber: 'chassis_number',
@@ -301,22 +322,60 @@ router.patch('/:id', async (req, res, next) => {
       clientId: 'client_id',
       purchasePrice: 'purchase_price',
       salePrice: 'sale_price',
+      purchaseId: 'purchase_id',
+      dateEntreePort: 'date_entree_port',
+      dateEntreeParc: 'date_entree_parc',
+      numeroBl: 'numero_bl',
+      natureStock: 'nature_stock',
+      maintenancePrestataire: 'maintenance_prestataire',
+      maintenanceDevis: 'maintenance_devis',
     };
+    const NATURE_STOCK_VALUES = ['DEPOT', 'TRANSIT', 'CONSOMMATION', 'AUTRES'];
     const updates = [];
     const params = [];
     for (const key of allowed) {
       if (req.body[key] === undefined) continue;
       const col = dbMap[key] ?? key;
       if (key === 'clientId') {
+        const raw = req.body[key];
+        const num = raw === null || raw === '' ? null : parseInt(req.body[key], 10);
+        if (num !== null && Number.isNaN(num)) continue; // valeur invalide, on ignore
         updates.push(`${col} = ?`);
-        params.push(req.body[key] === null || req.body[key] === '' ? null : parseInt(req.body[key], 10));
+        params.push(num);
       } else if (key === 'year' || key === 'purchasePrice' || key === 'salePrice') {
+        const raw = req.body[key];
+        const num = raw == null ? null : Number(raw);
+        if (num !== null && Number.isNaN(num)) continue; // éviter d'envoyer NaN à MySQL
         updates.push(`${col} = ?`);
-        params.push(req.body[key] == null ? null : Number(req.body[key]));
+        params.push(num);
       } else if (key === 'status' && VEHICLE_STATUSES.includes(req.body[key])) {
         updates.push(`${col} = ?`);
         params.push(req.body[key]);
-      } else if (key !== 'status') {
+      } else if (key === 'regularise') {
+        updates.push('regularise = ?');
+        params.push(req.body[key] ? 1 : 0);
+      } else if (key === 'inMaintenance') {
+        updates.push('in_maintenance = ?');
+        params.push(req.body[key] ? 1 : 0);
+      } else if (key === 'accidente') {
+        updates.push('accidente = ?');
+        params.push(req.body[key] ? 1 : 0);
+      } else if (key === 'purchaseId') {
+        updates.push('purchase_id = ?');
+        params.push(req.body[key] == null || req.body[key] === '' ? null : parseInt(req.body[key], 10));
+      } else if (key === 'natureStock' && (req.body[key] == null || NATURE_STOCK_VALUES.includes(req.body[key]))) {
+        updates.push(`${col} = ?`);
+        params.push(req.body[key] == null ? null : String(req.body[key]).trim());
+      } else if (key === 'dateEntreePort' || key === 'dateEntreeParc') {
+        updates.push(`${col} = ?`);
+        const raw = req.body[key];
+        if (raw == null || raw === '') {
+          params.push(null);
+        } else {
+          const d = new Date(raw);
+          params.push(Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 19).replace('T', ' '));
+        }
+      } else if (key !== 'status' && key !== 'natureStock') {
         updates.push(`${col} = ?`);
         params.push(req.body[key] == null ? null : String(req.body[key]).trim());
       }

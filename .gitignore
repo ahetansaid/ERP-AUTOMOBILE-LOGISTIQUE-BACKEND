@@ -1,6 +1,9 @@
 # Dépendances
 node_modules
 
+# Fichiers uploadés (documents, proformas, factures)
+uploads
+
 # Environnement (secrets)
 .env
 .env.local

@@ -21,7 +21,8 @@ npm install
 1. Créer la base `erp_automobile` dans phpMyAdmin (ou en ligne de commande).
 2. Exécuter le schéma :
    - Ouvrir `sql/schema.sql` dans phpMyAdmin → onglet SQL → Exécuter.
-3. Créer l’utilisateur admin par défaut :
+3. **(Phase 2/3)** Exécuter les migrations : `sql/migration-002-phase2.sql` (proformas, payments), puis `sql/migration-003-compta-devis-factures.sql` (devis/factures : status, client_id, lines, TVA).
+4. Créer l’utilisateur admin par défaut :
    ```bash
    npm run seed
    ```
@@ -69,6 +70,40 @@ API : **http://localhost:3001**
 ### Reporting
 - `GET /reporting/evolution` — CA et marge dans le temps (query: year, months)
 
+### Phase 2 — Documents & VIN 360°
+- `GET /vehicles/:vehicleId/documents` — Liste des documents du véhicule
+- `POST /vehicles/:vehicleId/documents` — Upload (multipart: file, type, optionnel ocrPayload, operationId)
+- `POST /vehicles/:vehicleId/documents/generate-bl` — Génération BL (template) à partir des données transit
+
+### Compta — Charges
+- `GET /charges` — Liste globale (page Comptabilité) — query: vehicleId, page, limit, currency
+- `GET /vehicles/:vehicleId/charges` — Liste + total (par véhicule)
+- `POST /vehicles/:vehicleId/charges` — Ajout (label, amount, currency, chargeType)
+- `PATCH /vehicles/:vehicleId/charges/:chargeId` — Modifier
+- `DELETE /vehicles/:vehicleId/charges/:chargeId` — Supprimer
+
+### Phase 2 — Étapes de transit (alimentation BL)
+- `GET /vehicles/:vehicleId/transit-steps` — Liste
+- `POST /vehicles/:vehicleId/transit-steps` — Ajout (stepName, portLoading, portUnloading, vessel, consignee, shipper, etc.)
+- `PATCH /vehicles/:vehicleId/transit-steps/:stepId` — Modifier
+- `DELETE /vehicles/:vehicleId/transit-steps/:stepId` — Supprimer
+
+### Phase 2 — Proformas
+- `GET /vehicles/:vehicleId/proformas` — Liste
+- `GET /vehicles/:vehicleId/proformas/:proformaId` — Détail
+- `POST /vehicles/:vehicleId/proformas` — Création (estimatedCosts, schedule, generatePdf) + génération PDF
+
+### Compta — Factures & Devis
+- `GET /invoices` — Liste (query: vehicleId, status=DEVIS|FACTURE, page, limit)
+- `GET /invoices/:id` — Détail (avec lines, client, véhicule)
+- `POST /invoices` — Création (vehicleId, amount, status, clientId, lines, tvaRate, invoiceNumber, generatePdf)
+- `PATCH /invoices/:id` — Mise à jour (status, clientId, lines, tvaRate, mecefCode, sentAt, etc.)
+
+### Compta — Paiements & Trésorerie
+- `GET /payments` — Liste (query: vehicleId, invoiceId, page, limit)
+- `POST /payments` — Enregistrer un paiement (vehicleId, invoiceId, amount, paymentType, paidAt, reference)
+- `GET /treasury/summary` — Encaissements, décaissements, solde, byCurrency, multipleCurrencies (avertissement multi-devises)
+
 ### Utilitaires
 - `GET /health` — Statut API
 - `GET /api/ping-db` — Test connexion MySQL
@@ -90,10 +125,20 @@ src/
     dashboard.js
     transit.js
     reporting.js
+    documents.js     # Upload + génération BL
+    charges.js
+    transitSteps.js
+    proformas.js
+    invoices.js
+    payments.js
+    treasury.js
+  chargesList.js          # GET /charges (liste globale compta)
 sql/
-  schema.sql         # Création des tables
+  schema.sql                       # Création des tables (MVP)
+  migration-002-phase2.sql        # Proformas, payments
+  migration-003-compta-devis-factures.sql # Devis/factures (status, lines, TVA)
 scripts/
-  seed-user.js       # Utilisateur admin par défaut
+  seed-user.js            # Utilisateur admin par défaut
 ```
 
 ## Conventions
@@ -101,6 +146,8 @@ scripts/
 - Réponses JSON ; erreurs : `{ message, statusCode }`.
 - Pagination : `{ data: [...], total }`.
 - Auth : header `Authorization: Bearer <accessToken}` sur toutes les routes sauf login/refresh/logout.
+
+**Phase 3 (à venir)** : après agrément SFE DGI, brancher l’appel API DGI dans `POST /invoices` ou un endpoint dédié pour transmettre la facture et enregistrer le code MECeF / QR retourné.
 
 ## Dépôt Git
 
