@@ -1,0 +1,712 @@
+// ============================================================================
+// ParcAuto Manager — Schéma Prisma
+// Base : MySQL 5.7+ / 8.x (UTF8MB4, collation utf8mb4_unicode_ci)
+// Généré depuis scripts/create_database_complete.sql + extensions Phase 0
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS (remplacent les VARCHAR(50) status du schéma SQL)
+// ============================================================================
+
+enum VehicleStatus {
+  DISPONIBLE
+  EN_VENTE
+  VENDU
+  EN_MAINTENANCE
+  EN_TRANSIT
+  LIVRE
+  RESERVE
+}
+
+enum PurchaseStatus {
+  EN_COURS
+  ARRIVE
+  ANNULE
+}
+
+enum PurchaseType {
+  VRAC
+  CONTENEUR
+}
+
+enum InvoiceStatus {
+  EMISE
+  PARTIELLEMENT_PAYEE
+  PAYEE
+  ANNULEE
+  EN_RETARD
+}
+
+enum WorkshopQuoteStatus {
+  EN_ATTENTE
+  APPROUVE
+  REFUSE
+  EN_COURS
+  CLOTURE
+  TERMINE // compat avec les valeurs existantes en DB pré-migration
+}
+
+enum ProformaStatus {
+  BROUILLON
+  ENVOYEE
+  ACCEPTEE
+  REFUSEE
+  EXPIREE
+  CONVERTIE
+}
+
+enum ClientStatus {
+  ACTIF
+  INACTIF
+  PROSPECT
+  BLACKLISTE
+}
+
+enum TreasuryTxType {
+  ENCAISSEMENT
+  DECAISSEMENT
+}
+
+enum TransitStepName {
+  DEVIS
+  RESERVE
+  EMBARQUE
+  EN_TRANSIT
+  DEDOUANEMENT
+  LIVRE
+  ARCHIVE
+}
+
+enum NotificationType {
+  INFO
+  WARNING
+  ERROR
+  SUCCESS
+  PAYMENT_DUE
+  TRANSIT_DELAY
+  MAINTENANCE_DUE
+  QUOTE_EXPIRING
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  SALES
+  ACCOUNTING
+  WORKSHOP
+  LOGISTICS
+  USER
+  READ_ONLY
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  PASSWORD_RESET
+  PERMISSION_CHANGE
+  EXPORT
+  IMPORT
+}
+
+enum UploadKind {
+  VEHICLE_PHOTO
+  PURCHASE_DOCUMENT
+  INVOICE_PDF
+  RECEIPT_PDF
+  QUOTE_PDF
+  PROFORMA_PDF
+  TRANSIT_DOCUMENT
+  COMPANY_LOGO
+  USER_AVATAR
+  OTHER
+}
+
+enum EmailStatus {
+  PENDING
+  SENT
+  FAILED
+  BOUNCED
+  OPENED
+  CLICKED
+}
+
+// ============================================================================
+// CORE — Multi-tenant
+// ============================================================================
+
+model Company {
+  id              Int       @id @default(autoincrement()) @db.UnsignedInt
+  name            String    @db.VarChar(255)
+  address         String?   @db.Text
+  phone           String?   @db.VarChar(50)
+  email           String?   @db.VarChar(255)
+  // Phase 1 additions
+  logoUrl         String?   @map("logo_url") @db.VarChar(500)
+  primaryColor    String?   @map("primary_color") @db.VarChar(20)
+  secondaryColor  String?   @map("secondary_color") @db.VarChar(20)
+  invoiceTemplate String?   @map("invoice_template") @db.VarChar(50) // classic | minimal | gradient | compact
+  legalNumber     String?   @map("legal_number") @db.VarChar(100) // IFU / RCCM
+  country         String?   @db.VarChar(100)
+  defaultCurrency String?   @map("default_currency") @db.VarChar(10)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt       DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+
+  users            User[]
+  suppliers        Supplier[]
+  clients          Client[]
+  vehicles         Vehicle[]
+  purchases        Purchase[]
+  invoices         Invoice[]
+  receipts         Receipt[]
+  charges          Charge[]
+  workshopQuotes   WorkshopQuote[]
+  proformas        Proforma[]
+  exchangeRates    ExchangeRate[]
+  generatedReports GeneratedReport[]
+  notifications    Notification[]
+  treasuryTxs      TreasuryTransaction[]
+  auditLogs        AuditLog[]
+  uploads          Upload[]
+
+  @@map("companies")
+}
+
+// ============================================================================
+// AUTH & RBAC
+// ============================================================================
+
+model User {
+  id           Int       @id @default(autoincrement()) @db.UnsignedInt
+  email        String    @unique(map: "uk_users_email") @db.VarChar(255)
+  password     String    @db.VarChar(255)
+  firstName    String?   @map("first_name") @db.VarChar(100)
+  lastName     String?   @map("last_name") @db.VarChar(100)
+  role         UserRole  @default(USER)
+  companyId    Int?      @map("company_id") @db.UnsignedInt
+  isActive     Boolean   @default(true) @map("is_active") @db.TinyInt
+  // Phase 0 additions
+  twoFaEnabled Boolean   @default(false) @map("two_fa_enabled") @db.TinyInt
+  twoFaSecret  String?   @map("two_fa_secret") @db.VarChar(255)
+  lastLoginAt  DateTime? @map("last_login_at") @db.DateTime(0)
+  avatarUrl    String?   @map("avatar_url") @db.VarChar(500)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt    DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company             Company?             @relation(fields: [companyId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  rolePermissions     UserPermission[]
+  uploads             Upload[]
+
+  @@index([companyId], map: "idx_users_company")
+  @@map("users")
+}
+
+// Fine-grained permissions assignées à un utilisateur au-delà de son rôle
+model Permission {
+  id          Int     @id @default(autoincrement()) @db.UnsignedInt
+  code        String  @unique(map: "uk_permissions_code") @db.VarChar(100) // ex: invoices.create
+  module      String  @db.VarChar(50) // ex: invoices
+  action      String  @db.VarChar(50) // ex: create, read, update, delete, export
+  description String? @db.VarChar(255)
+
+  users UserPermission[]
+
+  @@index([module], map: "idx_permissions_module")
+  @@map("permissions")
+}
+
+model UserPermission {
+  userId       Int      @map("user_id") @db.UnsignedInt
+  permissionId Int      @map("permission_id") @db.UnsignedInt
+  grantedAt    DateTime @default(now()) @map("granted_at") @db.DateTime(0)
+  grantedBy    Int?     @map("granted_by") @db.UnsignedInt
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+  @@map("user_permissions")
+}
+
+model Session {
+  id           Int       @id @default(autoincrement()) @db.UnsignedInt
+  userId       Int       @map("user_id") @db.UnsignedInt
+  refreshToken String    @unique(map: "uk_sessions_refresh") @map("refresh_token") @db.VarChar(512)
+  userAgent    String?   @map("user_agent") @db.VarChar(500)
+  ipAddress    String?   @map("ip_address") @db.VarChar(45)
+  expiresAt    DateTime  @map("expires_at") @db.DateTime(0)
+  revokedAt    DateTime? @map("revoked_at") @db.DateTime(0)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "idx_sessions_user")
+  @@index([expiresAt], map: "idx_sessions_expires")
+  @@map("sessions")
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement()) @db.UnsignedInt
+  userId    Int       @map("user_id") @db.UnsignedInt
+  token     String    @unique(map: "uk_prt_token") @db.VarChar(255)
+  expiresAt DateTime  @map("expires_at") @db.DateTime(0)
+  usedAt    DateTime? @map("used_at") @db.DateTime(0)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "idx_prt_user")
+  @@map("password_reset_tokens")
+}
+
+// ============================================================================
+// AUDIT
+// ============================================================================
+
+model AuditLog {
+  id         BigInt      @id @default(autoincrement()) @db.UnsignedBigInt
+  companyId  Int?        @map("company_id") @db.UnsignedInt
+  userId     Int?        @map("user_id") @db.UnsignedInt
+  action     AuditAction
+  resource   String      @db.VarChar(100) // ex: invoices
+  resourceId Int?        @map("resource_id") @db.UnsignedInt
+  before     Json?       @db.Json
+  after      Json?       @db.Json
+  ipAddress  String?     @map("ip_address") @db.VarChar(45)
+  userAgent  String?     @map("user_agent") @db.VarChar(500)
+  createdAt  DateTime    @default(now()) @map("created_at") @db.DateTime(0)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_audit_company")
+  @@index([userId], map: "idx_audit_user")
+  @@index([resource, resourceId], map: "idx_audit_resource")
+  @@index([createdAt], map: "idx_audit_created")
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// TIERS (Fournisseurs / Clients)
+// ============================================================================
+
+model Supplier {
+  id          Int       @id @default(autoincrement()) @db.UnsignedInt
+  companyId   Int?      @map("company_id") @db.UnsignedInt
+  name        String    @db.VarChar(255)
+  contactName String?   @map("contact_name") @db.VarChar(255)
+  email       String?   @db.VarChar(255)
+  phone       String?   @db.VarChar(50)
+  address     String?   @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_suppliers_company")
+  @@map("suppliers")
+}
+
+model Client {
+  id          Int          @id @default(autoincrement()) @db.UnsignedInt
+  companyId   Int?         @map("company_id") @db.UnsignedInt
+  name        String       @db.VarChar(255)
+  email       String?      @db.VarChar(255)
+  phone       String?      @db.VarChar(50)
+  address     String?      @db.Text
+  city        String?      @db.VarChar(100)
+  country     String?      @db.VarChar(100)
+  notes       String?      @db.Text
+  status      ClientStatus @default(ACTIF)
+  contactName String?      @map("contact_name") @db.VarChar(255)
+  createdAt   DateTime     @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime?    @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company   Company?   @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  vehicles  Vehicle[]
+  invoices  Invoice[]
+  proformas Proforma[]
+
+  @@index([companyId], map: "idx_clients_company")
+  @@map("clients")
+}
+
+// ============================================================================
+// STOCK & ACHATS
+// ============================================================================
+
+model Vehicle {
+  id                Int           @id @default(autoincrement()) @db.UnsignedInt
+  companyId         Int?          @map("company_id") @db.UnsignedInt
+  vin               String?       @db.VarChar(50)
+  brand             String?       @db.VarChar(100)
+  model             String?       @db.VarChar(100)
+  year              Int?          @db.UnsignedSmallInt
+  color             String?       @db.VarChar(50)
+  status            VehicleStatus @default(DISPONIBLE)
+  purchasePrice     Decimal       @default(0) @map("purchase_price") @db.Decimal(15, 2)
+  purchasePriceFcfa Decimal?      @map("purchase_price_fcfa") @db.Decimal(15, 2)
+  transportFees     Decimal       @default(0) @map("transport_fees") @db.Decimal(15, 2)
+  priceSale         Decimal?      @map("price_sale") @db.Decimal(15, 2)
+  clientId          Int?          @map("client_id") @db.UnsignedInt
+  // Phase 1 additions
+  mileage           Int?          @db.UnsignedInt
+  registration      String?       @db.VarChar(50)
+  countryOrigin     String?       @map("country_origin") @db.VarChar(100)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt         DateTime?     @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company          Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  client           Client?               @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  purchaseVehicles PurchaseVehicle[]
+  invoice          Invoice?
+  workshopQuotes   WorkshopQuote[]
+  proformas        Proforma[]
+  transitSteps     TransitStep[]
+  treasuryTxs      TreasuryTransaction[]
+
+  @@index([companyId], map: "idx_vehicles_company")
+  @@index([status], map: "idx_vehicles_status")
+  @@index([vin], map: "idx_vehicles_vin")
+  @@index([clientId], map: "idx_vehicles_client")
+  @@map("vehicles")
+}
+
+model Purchase {
+  id                 Int            @id @default(autoincrement()) @db.UnsignedInt
+  companyId          Int            @map("company_id") @db.UnsignedInt
+  supplierName       String?        @map("supplier_name") @db.VarChar(255)
+  purchaseDate       DateTime?      @map("purchase_date") @db.Date
+  containerReference String?        @map("container_reference") @db.VarChar(100)
+  vessel             String?        @db.VarChar(255)
+  purchaseType       PurchaseType   @default(VRAC) @map("purchase_type")
+  currency           String         @default("FCFA") @db.VarChar(10)
+  status             PurchaseStatus @default(EN_COURS)
+  arrivalDate        DateTime?      @map("arrival_date") @db.Date
+  createdAt          DateTime       @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt          DateTime?      @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company          Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  purchaseVehicles PurchaseVehicle[]
+  treasuryTxs      TreasuryTransaction[]
+
+  @@index([companyId], map: "idx_purchases_company")
+  @@index([status], map: "idx_purchases_status")
+  @@map("purchases")
+}
+
+model PurchaseVehicle {
+  id         Int      @id @default(autoincrement()) @db.UnsignedInt
+  purchaseId Int      @map("purchase_id") @db.UnsignedInt
+  vehicleId  Int      @map("vehicle_id") @db.UnsignedInt
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(0)
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  vehicle  Vehicle  @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@unique([purchaseId, vehicleId], map: "uk_pv")
+  @@index([vehicleId], map: "idx_pv_vehicle")
+  @@map("purchase_vehicles")
+}
+
+// ============================================================================
+// FACTURATION & COMPTA
+// ============================================================================
+
+model Invoice {
+  id            Int           @id @default(autoincrement()) @db.UnsignedInt
+  companyId     Int?          @map("company_id") @db.UnsignedInt
+  vehicleId     Int           @unique(map: "uk_invoices_vehicle") @map("vehicle_id") @db.UnsignedInt
+  clientId      Int           @map("client_id") @db.UnsignedInt
+  totalAmount   Decimal       @map("total_amount") @db.Decimal(15, 2)
+  invoiceNumber String        @map("invoice_number") @db.VarChar(50)
+  dueDate       DateTime?     @map("due_date") @db.Date
+  status        InvoiceStatus @default(EMISE)
+  createdAt     DateTime      @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt     DateTime?     @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company  Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  vehicle  Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  client   Client    @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  receipts Receipt[]
+
+  @@index([companyId], map: "idx_invoices_company")
+  @@index([vehicleId], map: "idx_invoices_vehicle")
+  @@index([clientId], map: "idx_invoices_client")
+  @@map("invoices")
+}
+
+model Receipt {
+  id              Int      @id @default(autoincrement()) @db.UnsignedInt
+  companyId       Int?     @map("company_id") @db.UnsignedInt
+  invoiceId       Int?     @map("invoice_id") @db.UnsignedInt
+  workshopQuoteId Int?     @map("workshop_quote_id") @db.UnsignedInt
+  amount          Decimal  @db.Decimal(15, 2)
+  paymentMethod   String?  @map("payment_method") @db.VarChar(50)
+  paymentDate     DateTime @map("payment_date") @db.Date
+  reference       String?  @db.VarChar(100)
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(0)
+
+  company       Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  invoice       Invoice?              @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  workshopQuote WorkshopQuote?        @relation(fields: [workshopQuoteId], references: [id], onDelete: SetNull)
+  treasuryTxs   TreasuryTransaction[]
+
+  @@index([companyId], map: "idx_receipts_company")
+  @@index([invoiceId], map: "idx_receipts_invoice")
+  @@index([workshopQuoteId], map: "idx_receipts_workshop_quote")
+  @@map("receipts")
+}
+
+model Charge {
+  id             Int       @id @default(autoincrement()) @db.UnsignedInt
+  companyId      Int?      @map("company_id") @db.UnsignedInt
+  label          String    @db.VarChar(255)
+  category       String?   @db.VarChar(100)
+  amount         Decimal   @db.Decimal(15, 2)
+  chargeDate     DateTime  @map("charge_date") @db.Date
+  deletionReason String?   @map("deletion_reason") @db.Text
+  deletedAt      DateTime? @map("deleted_at") @db.DateTime(0)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt      DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company     Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  treasuryTxs TreasuryTransaction[]
+
+  @@index([companyId], map: "idx_charges_company")
+  @@index([chargeDate], map: "idx_charges_date")
+  @@map("charges")
+}
+
+model WorkshopQuote {
+  id          Int                 @id @default(autoincrement()) @db.UnsignedInt
+  companyId   Int?                @map("company_id") @db.UnsignedInt
+  vehicleId   Int                 @map("vehicle_id") @db.UnsignedInt
+  prestataire String              @db.VarChar(255)
+  amount      Decimal             @db.Decimal(15, 2)
+  currency    String              @default("FCFA") @db.VarChar(10)
+  description String?             @db.Text
+  validUntil  DateTime?           @map("valid_until") @db.Date
+  status      WorkshopQuoteStatus @default(EN_ATTENTE)
+  closedAt    DateTime?           @map("closed_at") @db.DateTime(0)
+  createdAt   DateTime            @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime?           @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company     Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  vehicle     Vehicle               @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  receipts    Receipt[]
+  treasuryTxs TreasuryTransaction[]
+
+  @@index([companyId], map: "idx_wq_company")
+  @@index([vehicleId], map: "idx_wq_vehicle")
+  @@index([status], map: "idx_wq_status")
+  @@map("workshop_quotes")
+}
+
+model Proforma {
+  id             Int             @id @default(autoincrement()) @db.UnsignedInt
+  companyId      Int?            @map("company_id") @db.UnsignedInt
+  vehicleId      Int?            @map("vehicle_id") @db.UnsignedInt
+  clientId       Int?            @map("client_id") @db.UnsignedInt
+  totalAmount    Decimal?        @map("total_amount") @db.Decimal(15, 2)
+  proformaNumber String?         @map("proforma_number") @db.VarChar(50)
+  status         ProformaStatus? @default(BROUILLON)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt      DateTime?       @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  vehicle Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  client  Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_proformas_company")
+  @@index([vehicleId], map: "idx_proformas_vehicle")
+  @@index([clientId], map: "idx_proformas_client")
+  @@map("proformas")
+}
+
+// ============================================================================
+// TRANSIT
+// ============================================================================
+
+model TransitStep {
+  id            Int             @id @default(autoincrement()) @db.UnsignedInt
+  vehicleId     Int?            @map("vehicle_id") @db.UnsignedInt
+  stepName      TransitStepName @map("step_name")
+  dateArrival   DateTime?       @map("date_arrival") @db.Date
+  dateDeparture DateTime?       @map("date_departure") @db.Date
+  createdAt     DateTime        @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt     DateTime?       @updatedAt @map("updated_at") @db.DateTime(0)
+
+  vehicle Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId], map: "idx_transit_vehicle")
+  @@index([stepName], map: "idx_transit_step")
+  @@map("transit_steps")
+}
+
+// ============================================================================
+// TRÉSORERIE
+// ============================================================================
+
+model TreasuryTransaction {
+  id              Int            @id @default(autoincrement()) @db.UnsignedInt
+  companyId       Int?           @map("company_id") @db.UnsignedInt
+  type            TreasuryTxType
+  categorie       String         @db.VarChar(80)
+  reference       String?        @db.VarChar(100)
+  montant         Decimal        @db.Decimal(15, 2)
+  transactionDate DateTime       @map("transaction_date") @db.Date
+  vehicleId       Int?           @map("vehicle_id") @db.UnsignedInt
+  description     String?        @db.Text
+  receiptId       Int?           @map("receipt_id") @db.UnsignedInt
+  purchaseId      Int?           @map("purchase_id") @db.UnsignedInt
+  workshopQuoteId Int?           @map("workshop_quote_id") @db.UnsignedInt
+  chargeId        Int?           @map("charge_id") @db.UnsignedInt
+  createdAt       DateTime       @default(now()) @map("created_at") @db.DateTime(0)
+
+  company       Company?       @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  vehicle       Vehicle?       @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  receipt       Receipt?       @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+  purchase      Purchase?      @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  workshopQuote WorkshopQuote? @relation(fields: [workshopQuoteId], references: [id], onDelete: SetNull)
+  charge        Charge?        @relation(fields: [chargeId], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_tt_company")
+  @@index([type], map: "idx_tt_type")
+  @@index([transactionDate], map: "idx_tt_date")
+  @@index([vehicleId], map: "idx_tt_vehicle")
+  @@index([receiptId], map: "idx_tt_receipt")
+  @@index([purchaseId], map: "idx_tt_purchase")
+  @@index([chargeId], map: "idx_tt_charge")
+  @@map("transactions_tresorerie")
+}
+
+// ============================================================================
+// PARAMÉTRAGE & RAPPORTS
+// ============================================================================
+
+model ExchangeRate {
+  id        Int       @id @default(autoincrement()) @db.UnsignedInt
+  companyId Int?      @map("company_id") @db.UnsignedInt
+  currency  String    @db.VarChar(10)
+  rateFcfa  Decimal   @map("rate_fcfa") @db.Decimal(15, 4)
+  isActive  Boolean   @default(true) @map("is_active") @db.TinyInt
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@unique([companyId, currency], map: "uk_er_company_currency")
+  @@index([companyId], map: "idx_er_company")
+  @@map("exchange_rates")
+}
+
+model GeneratedReport {
+  id          Int       @id @default(autoincrement()) @db.UnsignedInt
+  companyId   Int?      @map("company_id") @db.UnsignedInt
+  name        String?   @db.VarChar(255)
+  type        String?   @db.VarChar(50)
+  periodStart DateTime? @map("period_start") @db.Date
+  periodEnd   DateTime? @map("period_end") @db.Date
+  filePath    String?   @map("file_path") @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_gr_company")
+  @@index([createdAt], map: "idx_gr_created")
+  @@map("generated_reports")
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+model Notification {
+  id        Int              @id @default(autoincrement()) @db.UnsignedInt
+  userId    Int?             @map("user_id") @db.UnsignedInt
+  companyId Int?             @map("company_id") @db.UnsignedInt
+  type      NotificationType @default(INFO)
+  title     String?          @db.VarChar(255)
+  message   String?          @db.Text
+  link      String?          @db.VarChar(500)
+  read      Boolean          @default(false) @db.TinyInt
+  createdAt DateTime         @default(now()) @map("created_at") @db.DateTime(0)
+
+  user    User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([userId], map: "idx_notif_user")
+  @@index([companyId], map: "idx_notif_company")
+  @@index([read], map: "idx_notif_read")
+  @@map("notifications")
+}
+
+// ============================================================================
+// EMAILS (traçabilité envois transactionnels)
+// ============================================================================
+
+model EmailEvent {
+  id         BigInt      @id @default(autoincrement()) @db.UnsignedBigInt
+  companyId  Int?        @map("company_id") @db.UnsignedInt
+  toEmail    String      @map("to_email") @db.VarChar(255)
+  subject    String      @db.VarChar(500)
+  template   String?     @db.VarChar(100)
+  status     EmailStatus @default(PENDING)
+  providerId String?     @map("provider_id") @db.VarChar(255)
+  errorMsg   String?     @map("error_msg") @db.Text
+  resource   String?     @db.VarChar(100) // ex: invoice
+  resourceId Int?        @map("resource_id") @db.UnsignedInt
+  sentAt     DateTime?   @map("sent_at") @db.DateTime(0)
+  createdAt  DateTime    @default(now()) @map("created_at") @db.DateTime(0)
+
+  @@index([companyId], map: "idx_email_company")
+  @@index([status], map: "idx_email_status")
+  @@index([resource, resourceId], map: "idx_email_resource")
+  @@map("email_events")
+}
+
+// ============================================================================
+// UPLOADS / FICHIERS (MinIO/S3)
+// ============================================================================
+
+model Upload {
+  id         Int        @id @default(autoincrement()) @db.UnsignedInt
+  companyId  Int?       @map("company_id") @db.UnsignedInt
+  uploadedBy Int?       @map("uploaded_by") @db.UnsignedInt
+  kind       UploadKind
+  resource   String?    @db.VarChar(100)
+  resourceId Int?       @map("resource_id") @db.UnsignedInt
+  fileName   String     @map("file_name") @db.VarChar(500)
+  mimeType   String     @map("mime_type") @db.VarChar(100)
+  sizeBytes  BigInt     @map("size_bytes") @db.UnsignedBigInt
+  storageKey String     @map("storage_key") @db.VarChar(500) // clé S3/MinIO
+  publicUrl  String?    @map("public_url") @db.VarChar(500)
+  version    Int        @default(1) @db.UnsignedInt
+  createdAt  DateTime   @default(now()) @map("created_at") @db.DateTime(0)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_uploads_company")
+  @@index([uploadedBy], map: "idx_uploads_user")
+  @@index([resource, resourceId], map: "idx_uploads_resource")
+  @@index([kind], map: "idx_uploads_kind")
+  @@map("uploads")
+}

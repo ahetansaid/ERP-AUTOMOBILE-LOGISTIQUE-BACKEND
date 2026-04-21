@@ -1,204 +1,185 @@
-import { Router } from 'express';
-import path from 'path';
-import fs from 'fs';
-import PDFDocument from 'pdfkit';
-import pool from '../db.js';
-import { authMiddleware } from '../middlewares/auth.js';
-import { UPLOAD_DIR } from '../config.js';
+const express = require('express');
+const { getPool } = require('../config/database');
+const router = express.Router();
 
-const router = Router();
-router.use(authMiddleware);
-
-const invoiceDir = path.join(process.cwd(), UPLOAD_DIR, 'invoices');
-try {
-  fs.mkdirSync(invoiceDir, { recursive: true });
-} catch (_) {}
-
-function toInvoiceRow(row, extra = {}) {
-  return {
-    id: String(row.id),
-    vehicleId: String(row.vehicle_id),
-    status: row.status ?? 'FACTURE',
-    typeFacture: row.type_facture ?? 'COMPLETE',
-    clientId: row.client_id != null ? String(row.client_id) : null,
-    tvaRate: row.tva_rate != null ? Number(row.tva_rate) : null,
-    lines: row.lines ?? null,
-    invoiceNumber: row.invoice_number ?? null,
-    mecefCode: row.mecef_code ?? null,
-    qrCodePath: row.qr_code_path ?? null,
-    pdfPath: row.pdf_path ?? null,
-    amount: row.amount != null ? Number(row.amount) : null,
-    sentAt: row.sent_at ?? null,
-    createdAt: row.created_at,
-    ...extra,
-  };
-}
-
-// GET /invoices — liste avec filtres (vehicleId, status pour devis/facture)
-router.get('/', async (req, res, next) => {
+router.get('/', async (req, res) => {
   try {
-    const { vehicleId, status, page = 1, limit = 20 } = req.query;
-    const offset = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, Math.min(100, parseInt(limit, 10)));
-    const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10)));
-    const where = [];
-    const params = [];
-    if (vehicleId) { where.push('i.vehicle_id = ?'); params.push(vehicleId); }
-    if (status && ['DEVIS', 'FACTURE'].includes(status)) { where.push('i.status = ?'); params.push(status); }
-    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const [countRows] = await pool.execute(
-      `SELECT COUNT(*) AS total FROM invoices i ${whereClause}`,
-      params
-    );
-    const total = countRows[0]?.total ?? 0;
-    const [rows] = await pool.execute(
-      `SELECT i.*, v.vin, v.brand, v.model, v.year, c.name AS client_name
-       FROM invoices i
-       JOIN vehicles v ON v.id = i.vehicle_id
-       LEFT JOIN clients c ON c.id = i.client_id
-       ${whereClause}
-       ORDER BY i.created_at DESC LIMIT ? OFFSET ?`,
-      [...params, limitNum, offset]
-    );
-    res.status(200).json({
-      data: rows.map((r) => ({
-        ...toInvoiceRow(r),
-        vehicleVin: r.vin,
-        vehicleLabel: `${r.year} ${r.brand} ${r.model}`,
-        clientName: r.client_name ?? null,
-      })),
-      total,
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /invoices/:id
-router.get('/:id', async (req, res, next) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
-    const [rows] = await pool.execute(
-      `SELECT i.*, v.vin, v.brand, v.model, v.year,
-              c.name AS client_name, c.address AS client_address
-       FROM invoices i JOIN vehicles v ON v.id = i.vehicle_id
-       LEFT JOIN clients c ON c.id = COALESCE(i.client_id, v.client_id)
-       WHERE i.id = ?`,
-      [id]
-    );
-    const row = rows[0];
-    if (!row) return res.status(404).json({ message: 'Facture non trouvée', statusCode: 404 });
-    const inv = toInvoiceRow(row, {
-      vehicleVin: row.vin,
-      vehicleLabel: `${row.year} ${row.brand} ${row.model}`,
-      clientName: row.client_name,
-      clientAddress: row.client_address,
-    });
-    res.status(200).json(inv);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /invoices — création devis ou facture (vehicleId, amount, status, clientId, lines, tvaRate, typeFacture, generatePdf)
-router.post('/', async (req, res, next) => {
-  try {
-    const { vehicleId, amount, status, clientId, lines, tvaRate, typeFacture, invoiceNumber, generatePdf } = req.body;
-    if (!vehicleId) return res.status(400).json({ message: 'vehicleId requis', statusCode: 400 });
-    const vid = parseInt(vehicleId, 10);
-    if (Number.isNaN(vid)) return res.status(400).json({ message: 'vehicleId invalide', statusCode: 400 });
-    const [vehRows] = await pool.execute(
-      'SELECT v.*, c.name AS client_name, c.address AS client_address FROM vehicles v LEFT JOIN clients c ON c.id = v.client_id WHERE v.id = ?',
-      [vid]
-    );
-    const vehicle = vehRows[0];
-    if (!vehicle) return res.status(404).json({ message: 'Véhicule non trouvé', statusCode: 404 });
-    const invAmount = amount != null ? Number(amount) : (vehicle.sale_price != null ? Number(vehicle.sale_price) : null);
-    const invStatus = status === 'DEVIS' ? 'DEVIS' : 'FACTURE';
-    const invType = typeFacture === 'TEMPORAIRE' ? 'TEMPORAIRE' : 'COMPLETE';
-    const cid = clientId != null ? parseInt(clientId, 10) : vehicle.client_id;
-    const linesJson = lines != null ? (typeof lines === 'string' ? lines : JSON.stringify(lines)) : null;
-    const [result] = await pool.execute(
-      `INSERT INTO invoices (vehicle_id, amount, status, type_facture, client_id, tva_rate, lines, invoice_number)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [vid, invAmount, invStatus, invType, cid, tvaRate != null ? Number(tvaRate) : null, linesJson, invoiceNumber ?? null]
-    );
-    const invoiceId = result.insertId;
-    let pdfPath = null;
-    let mecefCode = null;
-    if (generatePdf) {
-      const dir = path.join(invoiceDir, String(vid));
-      fs.mkdirSync(dir, { recursive: true });
-      const filename = `facture-mecef-${invoiceId}-${Date.now()}.pdf`;
-      const fullPath = path.join(dir, filename);
-      pdfPath = path.relative(process.cwd(), fullPath).replace(/\\/g, '/');
-      const doc = new PDFDocument({ margin: 50 });
-      const stream = fs.createWriteStream(fullPath);
-      doc.pipe(stream);
-      doc.fontSize(16).text('FACTURE NORMALISÉE (Modèle MECeF)', { align: 'center' });
-      doc.moveDown();
-      doc.fontSize(10).text(`Facture n° ${invoiceId}`, { align: 'right' });
-      doc.text(`Date: ${new Date().toLocaleDateString('fr-FR')}`, { align: 'right' });
-      doc.moveDown();
-      doc.text(`Client: ${vehicle.client_name || '-'}`, { align: 'left' });
-      doc.text(`Adresse: ${vehicle.client_address || '-'}`, { align: 'left' });
-      doc.moveDown();
-      doc.text(`Véhicule: ${vehicle.year} ${vehicle.brand} ${vehicle.model} - VIN: ${vehicle.vin}`, { align: 'left' });
-      doc.text(`Montant: ${invAmount ?? 0} FCFA`, { align: 'left' });
-      doc.moveDown();
-      doc.fontSize(9).text('Code MECeF / QR: à renseigner après transmission DGI (agrément SFE)', { align: 'center' });
-      doc.end();
-      await new Promise((resolve, reject) => {
-        stream.on('finish', resolve);
-        stream.on('error', reject);
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin, v.price_sale FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id ORDER BY i.id DESC');
+    const out = [];
+    for (const r of rows) {
+      let paid = 0;
+      try {
+        const [rec] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [r.id]);
+        paid = Number(rec[0]?.paid ?? 0);
+      } catch (_) {}
+      const total = Number(r.total_amount) || 0;
+      const priceSale = Number(r.price_sale) || 0;
+      const remaining = Math.max(0, priceSale - paid);
+      out.push({
+        ...r,
+        amount: total,
+        total_amount: total,
+        paid_amount: paid,
+        remaining_amount: remaining,
+        price_sale: priceSale,
+        priceSale: priceSale,
+        prix_vente: priceSale,
       });
-      mecefCode = `MECEF-PLACEHOLDER-${invoiceId}`;
-      await pool.execute('UPDATE invoices SET pdf_path = ?, mecef_code = ? WHERE id = ?', [pdfPath, mecefCode, invoiceId]);
     }
-    const [rows] = await pool.execute(
-      'SELECT id, vehicle_id, mecef_code, qr_code_path, pdf_path, amount, sent_at, created_at FROM invoices WHERE id = ?',
-      [invoiceId]
-    );
-    const out = toInvoiceRow(rows[0]);
-    if (pdfPath) out.pdfPath = pdfPath;
-    if (mecefCode) out.mecefCode = mecefCode;
-    res.status(201).json(out);
-  } catch (err) {
-    next(err);
+    return res.status(200).json({ invoices: out, pagination: {} });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
-// PATCH /invoices/:id — mise à jour (status, typeFacture, clientId, lines, tvaRate, mecefCode, sentAt, etc.)
-router.patch('/:id', async (req, res, next) => {
+router.get('/:id', async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
-    const { status, typeFacture, clientId, lines, tvaRate, invoiceNumber, mecefCode, qrCodePath, pdfPath, sentAt } = req.body;
-    const updates = [];
-    const params = [];
-    if (status !== undefined && ['DEVIS', 'FACTURE'].includes(status)) { updates.push('status = ?'); params.push(status); }
-    if (typeFacture !== undefined && ['TEMPORAIRE', 'COMPLETE'].includes(typeFacture)) { updates.push('type_facture = ?'); params.push(typeFacture); }
-    if (clientId !== undefined) { updates.push('client_id = ?'); params.push(clientId == null ? null : parseInt(clientId, 10)); }
-    if (lines !== undefined) { updates.push('lines = ?'); params.push(typeof lines === 'string' ? lines : JSON.stringify(lines)); }
-    if (tvaRate !== undefined) { updates.push('tva_rate = ?'); params.push(tvaRate == null ? null : Number(tvaRate)); }
-    if (invoiceNumber !== undefined) { updates.push('invoice_number = ?'); params.push(invoiceNumber); }
-    if (mecefCode !== undefined) { updates.push('mecef_code = ?'); params.push(mecefCode); }
-    if (qrCodePath !== undefined) { updates.push('qr_code_path = ?'); params.push(qrCodePath); }
-    if (pdfPath !== undefined) { updates.push('pdf_path = ?'); params.push(pdfPath); }
-    if (sentAt !== undefined) { updates.push('sent_at = ?'); params.push(sentAt); }
-    if (updates.length === 0) {
-      const [rows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [id]);
-      if (!rows[0]) return res.status(404).json({ message: 'Facture non trouvée', statusCode: 404 });
-      return res.status(200).json(toInvoiceRow(rows[0]));
-    }
-    params.push(id);
-    await pool.execute(`UPDATE invoices SET ${updates.join(', ')} WHERE id = ?`, params);
-    const [rows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [id]);
-    if (!rows[0]) return res.status(404).json({ message: 'Facture non trouvée', statusCode: 404 });
-    res.status(200).json(toInvoiceRow(rows[0]));
-  } catch (err) {
-    next(err);
+    const id = req.params.id;
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin, v.price_sale FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+    const r = rows[0];
+    const [sumRow] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [id]);
+    const paid = Number(sumRow[0]?.paid ?? 0);
+    const priceSale = Number(r.price_sale) || 0;
+    const remaining = Math.max(0, priceSale - paid);
+    const [recRows] = await pool.execute('SELECT id, amount, payment_method, payment_date, reference FROM receipts WHERE invoice_id = ? ORDER BY payment_date ASC, id ASC', [id]);
+    const priceSaleUsed = priceSale;
+    let cumulative = 0;
+    const receipts = (recRows || []).map(function (rec) {
+      cumulative += Number(rec.amount) || 0;
+      const soldeApres = Math.max(0, priceSaleUsed - cumulative);
+      return {
+        id: rec.id,
+        amount: Number(rec.amount),
+        payment_method: rec.payment_method,
+        payment_date: rec.payment_date,
+        reference: rec.reference,
+        remaining_amount: soldeApres,
+        remainingAmount: soldeApres,
+        solde_restant_apres: soldeApres,
+      };
+    });
+    const invoice = {
+      ...r,
+      amount: Number(r.total_amount) || 0,
+      total_amount: Number(r.total_amount) || 0,
+      paid_amount: paid,
+      remaining_amount: remaining,
+      price_sale: priceSale,
+      priceSale: priceSale,
+      receipts,
+    };
+    return res.status(200).json(invoice);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
-export default router;
+router.post('/', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const vehicleId = body.vehicleId ?? body.vehicle_id;
+    const clientId = body.clientId ?? body.client_id;
+    const amount = body.amount ?? body.total_amount;
+    const dueDate = body.dueDate ?? body.due_date;
+    if (!vehicleId || !clientId || amount == null) return res.status(400).json({ message: 'vehicleId, clientId et amount (ou total_amount) requis', statusCode: 400 });
+    const pool = getPool();
+    const [vRow] = await pool.execute('SELECT price_sale FROM vehicles WHERE id = ?', [vehicleId]);
+    if (!vRow || !vRow.length) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    const priceSale = Number(vRow[0].price_sale);
+    if (priceSale == null || isNaN(priceSale) || priceSale <= 0) {
+      return res.status(400).json({
+        message: 'Le véhicule doit avoir un prix de vente renseigné pour créer la facture. Montant facture = prix de vente (1 facture = 1 véhicule).',
+        statusCode: 400,
+      });
+    }
+    const amountToUse = priceSale;
+    const [existingInvs] = await pool.execute('SELECT id, invoice_number FROM invoices WHERE vehicle_id = ?', [vehicleId]);
+    if (existingInvs && existingInvs.length > 0) {
+      const num = existingInvs[0].invoice_number || existingInvs[0].id;
+      return res.status(409).json({
+        message: 'Un véhicule ne peut avoir qu\'une seule facture. Ce véhicule a déjà une facture. Les paiements se font via des reçus liés à cette facture (page Reçus).',
+        statusCode: 409,
+        existingInvoice: num,
+      });
+    }
+    const y = new Date().getFullYear();
+    const [seq] = await pool.execute('SELECT COALESCE(MAX(CAST(SUBSTRING(invoice_number, -4) AS UNSIGNED)), 0) + 1 AS n FROM invoices WHERE YEAR(created_at) = ?', [y]);
+    const n = String(seq[0]?.n ?? 1).padStart(4, '0');
+    const invoice_number = 'FAV-' + y + '-' + n;
+    const [ins] = await pool.execute(
+      'INSERT INTO invoices (vehicle_id, client_id, total_amount, due_date, invoice_number, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [vehicleId, clientId, amountToUse, dueDate || null, invoice_number, 'EMISE']
+    );
+    const [created] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [ins.insertId]);
+    return res.status(201).json(created[0]);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+router.patch('/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const body = req.body || {};
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT i.id, i.total_amount FROM invoices i WHERE i.id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+    const [rec] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [id]);
+    const paid = Number(rec[0]?.paid ?? 0);
+    if (paid > 0) {
+      return res.status(409).json({ message: 'Un reçu a déjà été émis pour cette facture. Modification impossible.', statusCode: 409 });
+    }
+    const updates = [];
+    const values = [];
+    if (body.vehicleId != null) { updates.push('vehicle_id = ?'); values.push(body.vehicleId); }
+    if (body.clientId != null) { updates.push('client_id = ?'); values.push(body.clientId); }
+    if (body.amount != null || body.total_amount != null) {
+      const amt = body.amount != null ? body.amount : body.total_amount;
+      updates.push('total_amount = ?');
+      values.push(Number(amt));
+    }
+    if (body.dueDate !== undefined) { updates.push('due_date = ?'); values.push(body.dueDate || null); }
+    if (updates.length === 0) {
+      const [inv] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [id]);
+      return res.status(200).json(inv[0]);
+    }
+    values.push(id);
+    await pool.execute('UPDATE invoices SET ' + updates.join(', ') + ' WHERE id = ?', values);
+    const [updated] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [id]);
+    const r = updated[0];
+    const paidAmount = paid;
+    return res.status(200).json({ ...r, paid_amount: paidAmount, remaining_amount: Math.max(0, Number(r.total_amount) - paidAmount) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const reason = (req.body && req.body.reason) != null ? String(req.body.reason).trim() : null;
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT id FROM invoices WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+    const [rec] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [id]);
+    const paid = Number(rec[0]?.paid ?? 0);
+    if (paid > 0) {
+      return res.status(409).json({ message: 'Un reçu a déjà été émis pour cette facture. Suppression impossible.', statusCode: 409 });
+    }
+    await pool.execute('DELETE FROM receipts WHERE invoice_id = ?', [id]);
+    await pool.execute('DELETE FROM invoices WHERE id = ?', [id]);
+    return res.status(204).send();
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+module.exports = router;

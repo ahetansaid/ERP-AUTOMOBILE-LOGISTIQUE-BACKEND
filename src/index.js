@@ -1,79 +1,87 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import pool from './db.js';
-import { errorHandler } from './middlewares/errorHandler.js';
-import authRoutes from './routes/auth.js';
-import vehiclesRoutes from './routes/vehicles.js';
-import clientsRoutes from './routes/clients.js';
-import dashboardRoutes from './routes/dashboard.js';
-import transitRoutes from './routes/transit.js';
-import reportingRoutes from './routes/reporting.js';
-import documentsRoutes from './routes/documents.js';
-import chargesRoutes from './routes/charges.js';
-import transitStepsRoutes from './routes/transitSteps.js';
-import proformasRoutes from './routes/proformas.js';
-import invoicesRoutes from './routes/invoices.js';
-import paymentsRoutes from './routes/payments.js';
-import treasuryRoutes from './routes/treasury.js';
-import chargesListRoutes from './routes/chargesList.js';
-import stockRoutes from './routes/stock.js';
-import companyInfoRoutes from './routes/companyInfo.js';
-import receiptsRoutes from './routes/receipts.js';
-import transitOperationsRoutes from './routes/transitOperations.js';
-import purchasesRoutes from './routes/purchases.js';
-import devisRoutes from './routes/devis.js';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const authRoutes = require('./routes/auth');
+const dashboardRoutes = require('./routes/dashboard');
+const vehiclesRoutes = require('./routes/vehicles');
+const purchasesRoutes = require('./routes/purchases');
+const suppliersRoutes = require('./routes/suppliers');
+const clientsRoutes = require('./routes/clients');
+const chargesRoutes = require('./routes/charges');
+const devisRoutes = require('./routes/devis');
+const invoicesRoutes = require('./routes/invoices');
+const receiptsRoutes = require('./routes/receipts');
+const treasuryRoutes = require('./routes/treasury');
+const proformasRoutes = require('./routes/proformas');
+const reportsRoutes = require('./routes/reports');
+const transitRoutes = require('./routes/transit');
+const usersRoutes = require('./routes/users');
+const settingsRoutes = require('./routes/settings');
+const notificationsRoutes = require('./routes/notifications');
+const { authMiddleware } = require('./middleware/auth');
+const { tenantScope } = require('./middleware/tenant');
+const { attachAudit } = require('./middleware/audit');
 
 const app = express();
-const PORT = process.env.PORT ?? 3001;
+const PORT = process.env.PORT || 3001;
 
-app.use(cors({ origin: process.env.FRONTEND_URL ?? 'http://localhost:3000' }));
+const corsOptions = {
+  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
+app.use(attachAudit);
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'erp-automobile-api' });
-});
-
-// Test MySQL (optionnel)
-app.get('/api/ping-db', async (req, res) => {
-  try {
-    const [rows] = await pool.execute('SELECT 1 AS ok');
-    res.json({ db: 'ok', result: rows[0] });
-  } catch (err) {
-    res.status(500).json({ db: 'error', message: err.message });
-  }
-});
-
-// Routes métier (sous-routes véhicules avant /vehicles/:id)
 app.use('/auth', authRoutes);
-app.use('/vehicles', documentsRoutes);
-app.use('/vehicles', chargesRoutes);
-app.use('/vehicles', transitStepsRoutes);
-app.use('/vehicles', proformasRoutes);
-app.use('/vehicles', stockRoutes);
-app.use('/vehicles', vehiclesRoutes);
-app.use('/clients', clientsRoutes);
-app.use('/dashboard', dashboardRoutes);
-app.use('/transit', transitOperationsRoutes);
-app.use('/transit', transitRoutes);
-app.use('/company-info', companyInfoRoutes);
-app.use('/receipts', receiptsRoutes);
-app.use('/purchases', purchasesRoutes);
-app.use('/devis', devisRoutes);
-app.use('/reporting', reportingRoutes);
-app.use('/charges', chargesListRoutes);
-app.use('/invoices', invoicesRoutes);
-app.use('/payments', paymentsRoutes);
-app.use('/treasury', treasuryRoutes);
 
-// 404
-app.use((req, res) => {
-  res.status(404).json({ message: 'Route non trouvée', statusCode: 404 });
+app.use('/dashboard', authMiddleware, dashboardRoutes);
+app.use('/vehicles', authMiddleware, tenantScope, vehiclesRoutes);
+app.use('/purchases', authMiddleware, purchasesRoutes);
+app.use('/suppliers', authMiddleware, tenantScope, suppliersRoutes);
+app.use('/clients', authMiddleware, tenantScope, clientsRoutes);
+app.use('/charges', authMiddleware, chargesRoutes);
+app.use('/devis', authMiddleware, devisRoutes);
+app.use('/invoices', authMiddleware, invoicesRoutes);
+app.use('/receipts', authMiddleware, receiptsRoutes);
+app.use('/treasury', authMiddleware, treasuryRoutes);
+app.use('/proformas', authMiddleware, proformasRoutes);
+app.use('/reports', authMiddleware, reportsRoutes);
+app.use('/transit', authMiddleware, transitRoutes);
+app.use('/users', authMiddleware, usersRoutes);
+app.use('/settings', authMiddleware, settingsRoutes);
+app.use('/notifications', authMiddleware, notificationsRoutes);
+
+app.use('/api/auth', authRoutes);
+app.use('/api/dashboard', authMiddleware, dashboardRoutes);
+app.use('/api/vehicles', authMiddleware, tenantScope, vehiclesRoutes);
+app.use('/api/purchases', authMiddleware, purchasesRoutes);
+app.use('/api/suppliers', authMiddleware, tenantScope, suppliersRoutes);
+app.use('/api/clients', authMiddleware, tenantScope, clientsRoutes);
+app.use('/api/charges', authMiddleware, chargesRoutes);
+app.use('/api/devis', authMiddleware, devisRoutes);
+app.use('/api/invoices', authMiddleware, invoicesRoutes);
+app.use('/api/receipts', authMiddleware, receiptsRoutes);
+app.use('/api/treasury', authMiddleware, treasuryRoutes);
+app.use('/api/proformas', authMiddleware, proformasRoutes);
+app.use('/api/reports', authMiddleware, reportsRoutes);
+app.use('/api/transit', authMiddleware, transitRoutes);
+app.use('/api/users', authMiddleware, usersRoutes);
+app.use('/api/settings', authMiddleware, settingsRoutes);
+app.use('/api/notifications', authMiddleware, notificationsRoutes);
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
 });
 
-app.use(errorHandler);
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+});
 
 app.listen(PORT, () => {
-  console.log(`API ERP running on http://localhost:${PORT}`);
+  console.log('Serveur ParcAuto Manager sur le port', PORT);
 });

@@ -1,10 +1,4 @@
-# Dépendances
-node_modules
-
-# Fichiers uploadés (documents, proformas, factures)
-uploads
-
-# Environnement (secrets)
+node_modules/
 .env
 .env.local
 .env.*.local
@@ -17,8 +11,13 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# IDE
-.idea
-.vscode
+# Editor
+.vscode/
+.idea/
 *.swp
-*.swo
+
+# Prisma
+prisma/.tmp/
+
+# Backups
+*.bak

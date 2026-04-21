@@ -1,208 +1,256 @@
-import { Router } from 'express';
-import pool from '../db.js';
-import { authMiddleware } from '../middlewares/auth.js';
+const express = require('express');
+const { getPool } = require('../config/database');
+const { onPurchaseArrival } = require('../services/treasuryTransactions');
 
-const router = Router();
-router.use(authMiddleware);
+const router = express.Router();
 
-const TYPE_ACHAT = ['VRAC', 'CONTENEUR'];
+router.get('/', async (req, res) => {
+  try {
+    const companyId = req.query.companyId || req.user?.companyId;
+    const pool = getPool();
+    const sql = "SELECT p.*, (SELECT COUNT(*) FROM purchase_vehicles pv WHERE pv.purchase_id = p.id) AS vehicle_count, (SELECT COALESCE(SUM(COALESCE(v.purchase_price_fcfa, v.purchase_price, 0)), 0) FROM purchase_vehicles pv INNER JOIN vehicles v ON v.id = pv.vehicle_id WHERE pv.purchase_id = p.id) AS total_amount_fcfa FROM purchases p" + (companyId ? " WHERE p.company_id = ?" : "") + " ORDER BY p.purchase_date DESC, p.id DESC";
+    const params = companyId ? [companyId] : [];
+    const [rows] = await pool.execute(sql, params);
+    const purchases = rows.map(function (p) {
+      const name = p.supplier_name || '';
+      const { vehicle_count, total_amount_fcfa, ...rest } = p;
+      const status = rest.status ?? '';
+      const arrivalDate = rest.arrival_date ?? (status === 'ARRIVE' ? rest.updated_at : null);
+      const totalFcfa = Number(total_amount_fcfa ?? 0);
+      return {
+        ...rest,
+        supplier_name: name,
+        fournisseurNom: name,
+        vehicle_count: Number(vehicle_count) || 0,
+        statut: status,
+        arrival_date: arrivalDate,
+        date_arrivee: arrivalDate,
+        arrived_at: arrivalDate,
+        status_updated_at: arrivalDate,
+        amount_fcfa: totalFcfa,
+        montant_fcfa: totalFcfa,
+        montantFCFA: totalFcfa,
+        total_fcfa: totalFcfa,
+        total_amount: totalFcfa,
+      };
+    });
+    return res.status(200).json({ purchases });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
 
-function toPurchaseRow(row) {
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = getPool();
+    const [purchases] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [id]);
+    if (!purchases.length) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
+    const [vehiclesRows] = await pool.execute('SELECT v.* FROM vehicles v INNER JOIN purchase_vehicles pv ON pv.vehicle_id = v.id WHERE pv.purchase_id = ? ORDER BY v.id', [id]);
+    const vehicles = (vehiclesRows || []).map(function (v) {
+      const fcfa = v.purchase_price_fcfa != null ? Number(v.purchase_price_fcfa) : null;
+      return { ...v, purchasePriceFcfa: fcfa, montant_fcfa: fcfa, montantFCFA: fcfa };
+    });
+    const totalFcfa = vehicles.reduce(function (sum, v) {
+      const val = v.purchase_price_fcfa != null ? Number(v.purchase_price_fcfa) : (Number(v.purchase_price) || 0);
+      return sum + val;
+    }, 0);
+    const p = purchases[0];
+    const name = p.supplier_name || '';
+    const arrivalDate = p.arrival_date ?? (p.status === 'ARRIVE' ? p.updated_at : null);
+    const purchase = {
+      ...p,
+      supplier_name: name,
+      fournisseurNom: name,
+      vehicle_count: vehicles.length,
+      statut: p.status ?? '',
+      arrival_date: arrivalDate,
+      date_arrivee: arrivalDate,
+      arrived_at: arrivalDate,
+      status_updated_at: arrivalDate,
+      amount_fcfa: totalFcfa,
+      montant_fcfa: totalFcfa,
+      montantFCFA: totalFcfa,
+      total_fcfa: totalFcfa,
+      total_amount: totalFcfa,
+    };
+    return res.status(200).json({ purchase, vehicles });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+function mapVehicleFromBody(v) {
+  const purchasePrice = Number(v.purchase_price ?? v.prix_achat ?? v.prixAchat ?? 0);
+  const purchasePriceFcfaRaw = v.purchase_price_fcfa ?? v.purchasePriceFcfa ?? v.montant_fcfa ?? v.montantFCFA;
+  const purchase_price_fcfa = purchasePriceFcfaRaw != null && purchasePriceFcfaRaw !== '' ? Number(purchasePriceFcfaRaw) : null;
   return {
-    id: String(row.id),
-    purchasePrice: row.purchase_price != null ? Number(row.purchase_price) : null,
-    currency: row.currency ?? null,
-    typeAchat: row.type_achat ?? null,
-    containerReference: row.container_reference ?? null,
-    vessel: row.vessel ?? null,
-    conversionRate: row.conversion_rate != null ? Number(row.conversion_rate) : null,
-    amountFcfa: row.amount_fcfa != null ? Number(row.amount_fcfa) : null,
-    purchaseDate: row.purchase_date ?? null,
-    notes: row.notes ?? null,
-    vin: row.vin ?? null,
-    brand: row.brand ?? null,
-    model: row.model ?? null,
-    color: row.color ?? null,
-    year: row.year != null ? Number(row.year) : null,
-    vehicleType: row.vehicle_type ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    vin: v.vin ?? v.VIN ?? '',
+    brand: v.brand ?? v.marque ?? '',
+    model: v.model ?? v.modele ?? '',
+    year: v.year ?? v.annee ?? null,
+    color: v.color ?? v.couleur ?? '',
+    purchase_price: purchasePrice,
+    purchase_price_fcfa: purchase_price_fcfa,
+    price_sale: Number(v.price_sale ?? v.prix_vente ?? v.prixVente ?? 0),
   };
 }
 
-// GET /purchases — liste avec filtres (type, page, limit)
-router.get('/', async (req, res, next) => {
+router.post('/', async (req, res) => {
   try {
-    const { typeAchat, page = 1, limit = 20 } = req.query;
-    const offset = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, Math.min(100, parseInt(limit, 10)));
-    const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10)));
-    const where = [];
-    const params = [];
-    if (typeAchat && TYPE_ACHAT.includes(typeAchat)) {
-      where.push('type_achat = ?');
-      params.push(typeAchat);
+    const companyId = req.body.companyId || req.user?.companyId;
+    if (companyId == null || companyId === '') {
+      return res.status(400).json({ message: 'companyId requis (body ou JWT). Utilisateur sans societe : creer une company ou passer companyId dans le body.', statusCode: 400 });
     }
-    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const [countRows] = await pool.execute(`SELECT COUNT(*) AS total FROM purchases ${whereClause}`, params);
-    const total = countRows[0]?.total ?? 0;
-    const [rows] = await pool.execute(
-      `SELECT * FROM purchases ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-      [...params, limitNum, offset]
+    const body = req.body || {};
+    const supplier_name = (body.fournisseurNom || body.supplier_name || '').trim();
+    if (!supplier_name) {
+      return res.status(400).json({ message: 'Le fournisseur est obligatoire (fournisseurNom ou supplier_name).', statusCode: 400 });
+    }
+    const purchase_date = body.purchase_date ?? body.dateAchat ?? body.date_achat ?? new Date();
+    const container_reference = body.container_reference ?? body.conteneur ?? body.reference_conteneur ?? null;
+    const vessel = body.vessel ?? body.navire ?? null;
+    const purchase_type = body.purchase_type ?? body.type_achat ?? body.typeAchat ?? 'VRAC';
+    const currency = body.currency ?? body.devise ?? 'FCFA';
+    const vehicles = Array.isArray(body.vehicles) ? body.vehicles : (Array.isArray(body.vehicules) ? body.vehicules : []);
+    const pool = getPool();
+    const [insert] = await pool.execute(
+      "INSERT INTO purchases (company_id, supplier_name, purchase_date, container_reference, vessel, purchase_type, currency, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'EN_COURS')",
+      [companyId, supplier_name, purchase_date, container_reference, vessel, purchase_type, currency]
     );
-    res.status(200).json({ data: rows.map(toPurchaseRow), total });
+    const purchaseId = insert.insertId;
+    let totalSaleValue = 0;
+    for (const v of vehicles) {
+      const m = mapVehicleFromBody(v);
+      const [vIns] = await pool.execute(
+        "INSERT INTO vehicles (company_id, vin, brand, model, year, color, status, purchase_price, purchase_price_fcfa, price_sale) VALUES (?, ?, ?, ?, ?, ?, 'EN_TRANSIT', ?, ?, ?)",
+        [companyId, m.vin, m.brand, m.model, m.year, m.color, m.purchase_price, m.purchase_price_fcfa, m.price_sale]
+      );
+      await pool.execute('INSERT INTO purchase_vehicles (purchase_id, vehicle_id) VALUES (?, ?)', [purchaseId, vIns.insertId]);
+      totalSaleValue += m.price_sale;
+    }
+    const [created] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [purchaseId]);
+    const [createdVehiclesRows] = await pool.execute('SELECT v.* FROM vehicles v INNER JOIN purchase_vehicles pv ON pv.vehicle_id = v.id WHERE pv.purchase_id = ? ORDER BY v.id', [purchaseId]);
+    const createdVehicles = (createdVehiclesRows || []).map(function (v) {
+      const fcfa = v.purchase_price_fcfa != null ? Number(v.purchase_price_fcfa) : null;
+      return { ...v, purchasePriceFcfa: fcfa, montant_fcfa: fcfa, montantFCFA: fcfa };
+    });
+    const out = { ...created[0], supplier_name, fournisseurNom: supplier_name, vehicle_count: vehicles.length, total_sale_value: totalSaleValue };
+    return res.status(201).json({ message: 'Achat créé', purchase: out, vehicles: createdVehicles });
   } catch (err) {
-    next(err);
+    console.error(err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
-// GET /purchases/:id
-router.get('/:id', async (req, res, next) => {
+router.patch('/:id', async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
-    const [rows] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [id]);
-    if (!rows[0]) return res.status(404).json({ message: 'Achat non trouvé', statusCode: 404 });
-    res.status(200).json(toPurchaseRow(rows[0]));
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /purchases — nouvel achat (bloc véhicule: vin, brand, model, color, year, vehicleType ; prix ; type vrac/conteneur ; conteneur ; navire si vrac)
-router.post('/', async (req, res, next) => {
-  try {
-    const {
-      purchasePrice,
-      currency,
-      typeAchat,
-      containerReference,
-      vessel,
-      conversionRate,
-      amountFcfa,
-      purchaseDate,
-      notes,
-      vin,
-      brand,
-      model,
-      color,
-      year,
-      vehicleType,
-    } = req.body;
-    if (purchasePrice == null) return res.status(400).json({ message: 'purchasePrice requis', statusCode: 400 });
-    if (!typeAchat || !TYPE_ACHAT.includes(typeAchat)) {
-      return res.status(400).json({ message: 'typeAchat requis (VRAC | CONTENEUR)', statusCode: 400 });
+    const { id } = req.params;
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT status FROM purchases WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
+    if (rows[0].status !== 'EN_COURS') {
+      return res.status(409).json({ message: 'Modification autorisée uniquement si statut EN_COURS', statusCode: 409 });
     }
-    if (typeAchat === 'VRAC') {
-      if (!containerReference || !String(containerReference).trim()) {
-        return res.status(400).json({ message: 'En achat vrac, conteneur et navire sont obligatoires', statusCode: 400 });
-      }
-      if (!vessel || !String(vessel).trim()) {
-        return res.status(400).json({ message: 'En achat vrac, conteneur et navire sont obligatoires', statusCode: 400 });
-      }
-    }
-    if (typeAchat === 'CONTENEUR') {
-      if (!containerReference || !String(containerReference).trim()) {
-        return res.status(400).json({ message: 'En achat conteneur, le conteneur est obligatoire', statusCode: 400 });
-      }
-    }
-    const price = Number(purchasePrice);
-    if (Number.isNaN(price)) return res.status(400).json({ message: 'purchasePrice invalide', statusCode: 400 });
-    const rate = conversionRate != null ? Number(conversionRate) : null;
-    const fcfa = amountFcfa != null ? Number(amountFcfa) : (rate != null && !Number.isNaN(rate) ? price * rate : null);
-    let purchaseDateVal = purchaseDate ?? null;
-    if (purchaseDateVal && typeof purchaseDateVal === 'string') {
-      const d = new Date(purchaseDateVal);
-      purchaseDateVal = Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 19).replace('T', ' ');
-    }
-    const yearVal = year != null && year !== '' ? parseInt(year, 10) : null;
-    const [result] = await pool.execute(
-      `INSERT INTO purchases (purchase_price, currency, type_achat, container_reference, vessel, conversion_rate, amount_fcfa, purchase_date, notes, vin, brand, model, color, year, vehicle_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        price,
-        currency ?? 'USD',
-        typeAchat,
-        containerReference ?? null,
-        vessel ? String(vessel).trim() : null,
-        rate,
-        fcfa,
-        purchaseDateVal,
-        notes ?? null,
-        vin ? String(vin).trim() : null,
-        brand ? String(brand).trim() : null,
-        model ? String(model).trim() : null,
-        color ? String(color).trim() : null,
-        yearVal && !Number.isNaN(yearVal) ? yearVal : null,
-        vehicleType != null && vehicleType !== '' ? String(vehicleType).trim() : null,
-      ]
-    );
-    const [rows] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [result.insertId]);
-    res.status(201).json(toPurchaseRow(rows[0]));
-  } catch (err) {
-    next(err);
-  }
-});
-
-// PATCH /purchases/:id
-router.patch('/:id', async (req, res, next) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
-    const {
-      purchasePrice,
-      currency,
-      typeAchat,
-      containerReference,
-      vessel,
-      conversionRate,
-      amountFcfa,
-      purchaseDate,
-      notes,
-      vin,
-      brand,
-      model,
-      color,
-      year,
-      vehicleType,
-    } = req.body;
     const updates = [];
-    const params = [];
-    if (purchasePrice !== undefined) { updates.push('purchase_price = ?'); params.push(Number(purchasePrice)); }
-    if (currency !== undefined) { updates.push('currency = ?'); params.push(currency); }
-    if (typeAchat !== undefined && TYPE_ACHAT.includes(typeAchat)) { updates.push('type_achat = ?'); params.push(typeAchat); }
-    if (containerReference !== undefined) { updates.push('container_reference = ?'); params.push(containerReference ?? null); }
-    if (vessel !== undefined) { updates.push('vessel = ?'); params.push(vessel == null || vessel === '' ? null : String(vessel).trim()); }
-    if (conversionRate !== undefined) { updates.push('conversion_rate = ?'); params.push(conversionRate == null ? null : Number(conversionRate)); }
-    if (amountFcfa !== undefined) { updates.push('amount_fcfa = ?'); params.push(amountFcfa == null ? null : Number(amountFcfa)); }
-    if (purchaseDate !== undefined) {
-      let v = purchaseDate;
-      if (v && typeof v === 'string') {
-        const d = new Date(v);
-        v = Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 19).replace('T', ' ');
+    const values = [];
+    const body = req.body || {};
+    const supplierVal = body.fournisseurNom !== undefined ? body.fournisseurNom : body.supplier_name;
+    if (supplierVal !== undefined) {
+      updates.push('supplier_name = ?');
+      values.push(String(supplierVal).trim());
+    }
+    const dateVal = body.purchase_date ?? body.dateAchat ?? body.date_achat;
+    if (dateVal !== undefined) { updates.push('purchase_date = ?'); values.push(dateVal); }
+    const containerVal = body.container_reference ?? body.conteneur ?? body.reference_conteneur;
+    if (containerVal !== undefined) { updates.push('container_reference = ?'); values.push(containerVal); }
+    const vesselVal = body.vessel ?? body.navire;
+    if (vesselVal !== undefined) { updates.push('vessel = ?'); values.push(vesselVal); }
+    const typeVal = body.purchase_type ?? body.type_achat ?? body.typeAchat;
+    if (typeVal !== undefined) { updates.push('purchase_type = ?'); values.push(typeVal); }
+    const currencyVal = body.currency ?? body.devise;
+    if (currencyVal !== undefined) { updates.push('currency = ?'); values.push(currencyVal); }
+    if (updates.length) {
+      values.push(id);
+      await pool.execute('UPDATE purchases SET ' + updates.join(', ') + ' WHERE id = ?', values);
+    }
+    const vehiclesPayload = Array.isArray(body.vehicles) ? body.vehicles : (Array.isArray(body.vehicules) ? body.vehicules : []);
+    if (vehiclesPayload.length) {
+      const [pvRows] = await pool.execute('SELECT vehicle_id FROM purchase_vehicles WHERE purchase_id = ? ORDER BY vehicle_id', [id]);
+      const vehicleIds = (pvRows || []).map(function (row) { return row.vehicle_id; });
+      for (let i = 0; i < vehiclesPayload.length; i++) {
+        const v = vehiclesPayload[i];
+        const vid = v.id ?? v.vehicle_id ?? vehicleIds[i];
+        if (vid == null || !vehicleIds.includes(vid)) continue;
+        const fcfaRaw = v.purchase_price_fcfa ?? v.purchasePriceFcfa ?? v.montant_fcfa ?? v.montantFCFA;
+        const purchase_price_fcfa = (fcfaRaw != null && fcfaRaw !== '') ? Number(fcfaRaw) : null;
+        await pool.execute('UPDATE vehicles SET purchase_price_fcfa = ? WHERE id = ?', [purchase_price_fcfa, vid]);
       }
-      updates.push('purchase_date = ?');
-      params.push(v ?? null);
     }
-    if (notes !== undefined) { updates.push('notes = ?'); params.push(notes ?? null); }
-    if (vin !== undefined) { updates.push('vin = ?'); params.push(vin == null || vin === '' ? null : String(vin).trim()); }
-    if (brand !== undefined) { updates.push('brand = ?'); params.push(brand == null || brand === '' ? null : String(brand).trim()); }
-    if (model !== undefined) { updates.push('model = ?'); params.push(model == null || model === '' ? null : String(model).trim()); }
-    if (color !== undefined) { updates.push('color = ?'); params.push(color == null || color === '' ? null : String(color).trim()); }
-    if (year !== undefined) { updates.push('year = ?'); params.push(year == null || year === '' ? null : (Number.isNaN(parseInt(year, 10)) ? null : parseInt(year, 10))); }
-    if (vehicleType !== undefined) { updates.push('vehicle_type = ?'); params.push(vehicleType == null || vehicleType === '' ? null : String(vehicleType).trim()); }
-    if (updates.length === 0) {
-      const [rows] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [id]);
-      if (!rows[0]) return res.status(404).json({ message: 'Achat non trouvé', statusCode: 404 });
-      return res.status(200).json(toPurchaseRow(rows[0]));
-    }
-    params.push(id);
-    await pool.execute(`UPDATE purchases SET ${updates.join(', ')} WHERE id = ?`, params);
-    const [rows] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [id]);
-    if (!rows[0]) return res.status(404).json({ message: 'Achat non trouvé', statusCode: 404 });
-    res.status(200).json(toPurchaseRow(rows[0]));
+    const [updated] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [id]);
+    return res.status(200).json(updated[0]);
   } catch (err) {
-    next(err);
+    console.error(err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
-export default router;
+router.patch('/:id/arrive', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT id, status, company_id FROM purchases WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
+    const wasAlreadyArrive = rows[0].status === 'ARRIVE';
+    try {
+      await pool.execute("UPDATE purchases SET status = ?, arrival_date = COALESCE(?, CURDATE()) WHERE id = ?", ['ARRIVE', (req.body || {}).arrival_date || (req.body || {}).date_arrivee || null, id]);
+    } catch (e) {
+      await pool.execute("UPDATE purchases SET status = ? WHERE id = ?", ['ARRIVE', id]);
+    }
+    const [purch] = await pool.execute('SELECT arrival_date FROM purchases WHERE id = ?', [id]);
+    const arrivalDate = (purch[0] && purch[0].arrival_date) ? String(purch[0].arrival_date).slice(0, 10) : null;
+    const [vehicles] = await pool.execute('SELECT vehicle_id FROM purchase_vehicles WHERE purchase_id = ?', [id]);
+    for (const v of vehicles) {
+      await pool.execute('UPDATE vehicles SET status = ? WHERE id = ?', ['DISPONIBLE', v.vehicle_id]);
+    }
+    if (!wasAlreadyArrive) {
+      const companyId = rows[0].company_id;
+      const [vehiclesWithAmount] = await pool.execute(
+        'SELECT pv.vehicle_id, COALESCE(v.purchase_price_fcfa, v.purchase_price, 0) AS amount FROM purchase_vehicles pv INNER JOIN vehicles v ON v.id = pv.vehicle_id WHERE pv.purchase_id = ?',
+        [id]
+      );
+      const txnDate = arrivalDate || new Date().toISOString().slice(0, 10);
+      for (const row of vehiclesWithAmount || []) {
+        const amt = Number(row.amount) || 0;
+        if (amt > 0) await onPurchaseArrival(companyId, Number(id), row.vehicle_id, amt, txnDate);
+      }
+    }
+    const [updated] = await pool.execute('SELECT * FROM purchases WHERE id = ?', [id]);
+    return res.status(200).json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT status FROM purchases WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
+    if (rows[0].status !== 'EN_COURS') {
+      return res.status(409).json({ message: 'Suppression autorisée uniquement si statut EN_COURS', statusCode: 409 });
+    }
+    await pool.execute('DELETE FROM purchase_vehicles WHERE purchase_id = ?', [id]);
+    await pool.execute('DELETE FROM purchases WHERE id = ?', [id]);
+    return res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+module.exports = router;

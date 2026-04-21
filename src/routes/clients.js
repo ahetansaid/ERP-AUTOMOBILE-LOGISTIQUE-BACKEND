@@ -1,195 +1,269 @@
-import { Router } from 'express';
-import pool from '../db.js';
-import { authMiddleware } from '../middlewares/auth.js';
+const express = require('express');
+const { prisma } = require('../lib/prisma');
+const { authorize } = require('../middleware/rbac');
 
-const router = Router();
-router.use(authMiddleware);
+const router = express.Router();
 
-function toClientRow(row) {
+// Enrichit un client avec les alias français attendus par le front.
+function withFrenchAliases(c) {
   return {
-    id: String(row.id),
-    name: row.name,
-    email: row.email ?? null,
-    phone: row.phone ?? null,
-    address: row.address ?? null,
-    createdAt: row.created_at,
+    ...c,
+    nom: c.name,
+    telephone: c.phone,
+    adresse: c.address,
+    ville: c.city,
+    pays: c.country,
+    raison_sociale: c.name,
   };
 }
 
-// GET /clients
-router.get('/', async (req, res, next) => {
-  try {
-    const { search, page = 1, limit = 20 } = req.query;
-    const offset = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, Math.min(100, parseInt(limit, 10)));
-    const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10)));
+// Champs modifiables via PATCH/POST
+const MUTABLE_FIELDS = [
+  'name',
+  'email',
+  'phone',
+  'address',
+  'city',
+  'country',
+  'notes',
+  'status',
+  'contactName',
+];
 
-    let where = '';
-    const params = [];
-    if (search && String(search).trim()) {
-      where = 'WHERE name LIKE ? OR email LIKE ? OR phone LIKE ?';
-      const term = `%${String(search).trim()}%`;
-      params.push(term, term, term);
+function pickMutable(body) {
+  const data = {};
+  for (const key of MUTABLE_FIELDS) {
+    if (body[key] !== undefined) {
+      data[key] = body[key] === '' ? null : body[key];
     }
-    const [countRows] = await pool.execute(
-      `SELECT COUNT(*) AS total FROM clients ${where}`,
-      params
-    );
-    const total = countRows[0]?.total ?? 0;
+  }
+  return data;
+}
 
-    const [rows] = await pool.execute(
-      `SELECT * FROM clients ${where} ORDER BY name ASC LIMIT ? OFFSET ?`,
-      [...params, limitNum, offset]
-    );
-    res.status(200).json({ data: rows.map(toClientRow), total });
+// GET /clients — liste scope tenant
+router.get('/', authorize('clients', 'read'), async (req, res) => {
+  try {
+    const clients = await prisma.client.findMany({
+      where: req.tenantWhere(),
+      orderBy: { name: 'asc' },
+    });
+    return res.status(200).json({
+      clients: clients.map(withFrenchAliases),
+      pagination: {},
+    });
   } catch (err) {
-    next(err);
+    console.error('[clients.list]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
-// GET /clients/export — liste complète pour export PDF/Excel (format=json par défaut)
-router.get('/export', async (req, res, next) => {
+// GET /clients/:id — détail + historiques (factures, paiements, transit)
+router.get('/:id', authorize('clients', 'read'), async (req, res) => {
   try {
-    const { format } = req.query;
-    const [rows] = await pool.execute('SELECT * FROM clients ORDER BY name ASC');
-    const data = rows.map(toClientRow);
-    if (format === 'csv') {
-      const header = 'id;name;email;phone;address;createdAt\n';
-      const lines = data.map((c) => `${c.id};${(c.name || '').replace(/;/g, ',')};${c.email || ''};${c.phone || ''};${(c.address || '').replace(/;/g, ',')};${c.createdAt || ''}`).join('\n');
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', 'attachment; filename=clients.csv');
-      return res.send('\uFEFF' + header + lines);
-    }
-    res.status(200).json({ data, total: data.length });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /clients/:id — détail + opérations liées (véhicules, factures, paiements, opérations transit)
-router.get('/:id', async (req, res, next) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
       return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
     }
-    const [rows] = await pool.execute('SELECT * FROM clients WHERE id = ?', [id]);
-    const row = rows[0];
-    if (!row) {
-      return res.status(404).json({ message: 'Client non trouvé', statusCode: 404 });
+
+    const clientRow = await prisma.client.findFirst({
+      where: { id, ...req.tenantWhere() },
+    });
+    if (!clientRow) {
+      return res.status(404).json({ message: 'Client introuvable', statusCode: 404 });
     }
-    const client = toClientRow(row);
-    const [vehiclesRows] = await pool.execute(
-      'SELECT id, vin, brand, model, year, status FROM vehicles WHERE client_id = ? ORDER BY created_at DESC',
-      [id]
-    );
-    client.vehicles = vehiclesRows.map((v) => ({
-      id: String(v.id),
-      vin: v.vin,
-      brand: v.brand,
-      model: v.model,
-      year: v.year,
-      status: v.status,
+
+    const [invoices, paymentRows, transitRows] = await Promise.all([
+      prisma.invoice.findMany({
+        where: { clientId: id },
+        select: {
+          id: true,
+          invoiceNumber: true,
+          totalAmount: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.receipt.findMany({
+        where: { invoice: { clientId: id } },
+        select: {
+          id: true,
+          amount: true,
+          paymentDate: true,
+          paymentMethod: true,
+          reference: true,
+          invoice: { select: { invoiceNumber: true } },
+        },
+        orderBy: [{ paymentDate: 'desc' }, { id: 'desc' }],
+      }),
+      prisma.transitStep.findMany({
+        where: { vehicle: { clientId: id } },
+        select: {
+          id: true,
+          stepName: true,
+          dateArrival: true,
+          dateDeparture: true,
+          vehicle: {
+            select: { vin: true, brand: true, model: true },
+          },
+        },
+        orderBy: [{ dateArrival: 'desc' }, { id: 'desc' }],
+      }),
+    ]);
+
+    const paymentHistory = paymentRows.map((r) => ({
+      id: r.id,
+      amount: Number(r.amount),
+      payment_date: r.paymentDate,
+      payment_method: r.paymentMethod,
+      reference: r.reference,
+      source: r.invoice?.invoiceNumber || 'Facture',
+      invoice_number: r.invoice?.invoiceNumber,
     }));
-    const vehicleIds = vehiclesRows.map((v) => v.id);
-    if (vehicleIds.length > 0) {
-      const placeholders = vehicleIds.map(() => '?').join(',');
-      const [invRows] = await pool.execute(
-        `SELECT id, vehicle_id, amount, status, created_at FROM invoices WHERE vehicle_id IN (${placeholders}) ORDER BY created_at DESC`,
-        vehicleIds
-      );
-      client.invoices = invRows.map((i) => ({
-        id: String(i.id),
-        vehicleId: String(i.vehicle_id),
-        amount: i.amount != null ? Number(i.amount) : null,
-        status: i.status,
-        createdAt: i.created_at,
-      }));
-      const [payRows] = await pool.execute(
-        `SELECT p.id, p.amount, p.payment_type, p.paid_at, p.invoice_id, p.vehicle_id FROM payments p
-         WHERE p.vehicle_id IN (${placeholders}) OR p.invoice_id IN (SELECT id FROM invoices WHERE vehicle_id IN (${placeholders})) ORDER BY p.paid_at DESC`,
-        [...vehicleIds, ...vehicleIds]
-      );
-      client.payments = payRows.map((p) => ({
-        id: String(p.id),
-        amount: Number(p.amount),
-        paymentType: p.payment_type,
-        paidAt: p.paid_at,
-        invoiceId: p.invoice_id != null ? String(p.invoice_id) : null,
-        vehicleId: p.vehicle_id != null ? String(p.vehicle_id) : null,
-      }));
-    } else {
-      client.invoices = [];
-      client.payments = [];
-    }
-    const [transitRows] = await pool.execute(
-      'SELECT id, operation_type, reference, bl_number, date_arrivee_port, created_at FROM transit_operations WHERE client_id = ? ORDER BY created_at DESC',
-      [id]
-    );
-    client.transitOperations = transitRows.map((t) => ({
-      id: String(t.id),
-      operationType: t.operation_type,
-      reference: t.reference,
-      blNumber: t.bl_number,
-      dateArriveePort: t.date_arrivee_port,
-      createdAt: t.created_at,
+
+    const transitHistory = transitRows.map((t) => {
+      const label =
+        [t.vehicle?.brand, t.vehicle?.model].filter(Boolean).join(' ') ||
+        'Véhicule';
+      return {
+        id: t.id,
+        vin: t.vehicle?.vin,
+        vehicle: label,
+        etape: t.stepName,
+        step_name: t.stepName,
+        date_arrival: t.dateArrival,
+        date_departure: t.dateDeparture,
+        date_arrivee: t.dateArrival,
+        date_depart: t.dateDeparture,
+      };
+    });
+
+    const purchaseHistory = invoices.map((i) => ({
+      id: i.id,
+      invoice_number: i.invoiceNumber,
+      total_amount: Number(i.totalAmount),
+      created_at: i.createdAt,
     }));
-    res.status(200).json(client);
+
+    return res.status(200).json({
+      client: withFrenchAliases(clientRow),
+      purchaseHistory,
+      paymentHistory,
+      transitHistory,
+    });
   } catch (err) {
-    next(err);
+    console.error('[clients.detail]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
 // POST /clients
-router.post('/', async (req, res, next) => {
+router.post('/', authorize('clients', 'create'), async (req, res) => {
   try {
-    const { name, email, phone, address } = req.body;
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ message: 'Le nom est requis', statusCode: 400 });
+    const body = req.body || {};
+    if (!body.name) {
+      return res.status(400).json({ message: 'Nom requis', statusCode: 400 });
     }
-    const [result] = await pool.execute(
-      'INSERT INTO clients (name, email, phone, address) VALUES (?, ?, ?, ?)',
-      [
-        String(name).trim(),
-        email ? String(email).trim() : null,
-        phone ? String(phone).trim() : null,
-        address ? String(address).trim() : null,
-      ]
-    );
-    const [rows] = await pool.execute('SELECT * FROM clients WHERE id = ?', [result.insertId]);
-    res.status(201).json(toClientRow(rows[0]));
+    const data = {
+      ...pickMutable(body),
+      status: body.status || 'ACTIF',
+      companyId: req.companyId,
+    };
+    const created = await prisma.client.create({ data });
+    req.audit({
+      action: 'CREATE',
+      resource: 'clients',
+      resourceId: created.id,
+      after: created,
+    });
+    return res.status(201).json(withFrenchAliases(created));
   } catch (err) {
-    next(err);
+    console.error('[clients.create]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
 // PATCH /clients/:id
-router.patch('/:id', async (req, res, next) => {
+router.patch('/:id', authorize('clients', 'update'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
       return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
     }
-    const allowed = ['name', 'email', 'phone', 'address'];
-    const updates = [];
-    const params = [];
-    for (const key of allowed) {
-      if (req.body[key] === undefined) continue;
-      updates.push(`${key} = ?`);
-      params.push(req.body[key] == null ? null : String(req.body[key]).trim());
+
+    const before = await prisma.client.findFirst({
+      where: { id, ...req.tenantWhere() },
+    });
+    if (!before) {
+      return res.status(404).json({ message: 'Client introuvable', statusCode: 404 });
     }
-    if (updates.length === 0) {
-      const [rows] = await pool.execute('SELECT * FROM clients WHERE id = ?', [id]);
-      if (!rows[0]) return res.status(404).json({ message: 'Client non trouvé', statusCode: 404 });
-      return res.status(200).json(toClientRow(rows[0]));
+
+    const data = pickMutable(req.body || {});
+    const updated = Object.keys(data).length
+      ? await prisma.client.update({ where: { id }, data })
+      : before;
+
+    if (Object.keys(data).length) {
+      req.audit({
+        action: 'UPDATE',
+        resource: 'clients',
+        resourceId: id,
+        before,
+        after: updated,
+      });
     }
-    params.push(id);
-    await pool.execute(`UPDATE clients SET ${updates.join(', ')} WHERE id = ?`, params);
-    const [rows] = await pool.execute('SELECT * FROM clients WHERE id = ?', [id]);
-    if (!rows[0]) return res.status(404).json({ message: 'Client non trouvé', statusCode: 404 });
-    res.status(200).json(toClientRow(rows[0]));
+
+    return res.status(200).json(withFrenchAliases(updated));
   } catch (err) {
-    next(err);
+    console.error('[clients.update]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
 
-export default router;
+// DELETE /clients/:id — refus 409 si factures ou véhicules liés
+router.delete('/:id', authorize('clients', 'delete'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+
+    const before = await prisma.client.findFirst({
+      where: { id, ...req.tenantWhere() },
+    });
+    if (!before) {
+      return res.status(404).json({ message: 'Client introuvable', statusCode: 404 });
+    }
+
+    const [invoiceCount, vehicleCount] = await Promise.all([
+      prisma.invoice.count({ where: { clientId: id } }),
+      prisma.vehicle.count({ where: { clientId: id } }),
+    ]);
+
+    if (invoiceCount > 0) {
+      return res.status(409).json({
+        message: 'Impossible de supprimer : ce client a des factures liées.',
+        statusCode: 409,
+      });
+    }
+    if (vehicleCount > 0) {
+      return res.status(409).json({
+        message: 'Impossible de supprimer : ce client a des véhicules liés.',
+        statusCode: 409,
+      });
+    }
+
+    await prisma.client.delete({ where: { id } });
+    req.audit({
+      action: 'DELETE',
+      resource: 'clients',
+      resourceId: id,
+      before,
+    });
+    return res.status(204).send();
+  } catch (err) {
+    console.error('[clients.delete]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+module.exports = router;
