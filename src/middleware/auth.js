@@ -5,10 +5,17 @@ const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'refresh-change-me'
 
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  let token = null;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  } else if (typeof req.query.token === 'string' && req.query.token.length > 10) {
+    // Fallback pour les URLs de téléchargement (PDF inline, exports) ouvertes via window.open
+    // où les en-têtes Authorization ne peuvent pas être transmis.
+    token = req.query.token;
+  }
+  if (!token) {
     return res.status(401).json({ message: 'Token manquant ou invalide', statusCode: 401 });
   }
-  const token = authHeader.slice(7);
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = {

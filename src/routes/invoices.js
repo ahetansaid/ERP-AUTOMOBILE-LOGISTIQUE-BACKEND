@@ -1,5 +1,7 @@
 const express = require('express');
 const { getPool } = require('../config/database');
+const { prisma } = require('../lib/prisma');
+const { renderDocumentPdf } = require('../pdf/render');
 const router = express.Router();
 
 router.get('/', async (req, res) => {
@@ -179,6 +181,103 @@ router.delete('/:id', async (req, res) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+// GET /invoices/:id/pdf — génère un PDF de la facture (template au choix via ?template=minimal)
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+
+    const [invoice, receipts] = await Promise.all([
+      prisma.invoice.findUnique({
+        where: { id },
+        include: {
+          client: true,
+          vehicle: true,
+          company: true,
+        },
+      }),
+      prisma.receipt.findMany({
+        where: { invoiceId: id },
+        orderBy: [{ paymentDate: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
+
+    if (!invoice) {
+      return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+    }
+
+    const paid = receipts.reduce((s, r) => s + Number(r.amount || 0), 0);
+    const priceSale = Number(invoice.vehicle?.priceSale) || Number(invoice.totalAmount) || 0;
+    const totalAmount = priceSale > 0 ? priceSale : Number(invoice.totalAmount) || 0;
+
+    const data = {
+      kind: 'FACTURE',
+      number: invoice.invoiceNumber,
+      issuedAt: invoice.createdAt,
+      dueDate: invoice.dueDate,
+      currency: 'FCFA',
+      vatRate: 0,
+      statusLabel:
+        paid >= totalAmount ? 'Payée' : paid > 0 ? 'Partiellement payée' : 'En attente',
+      lines: [
+        {
+          label:
+            invoice.vehicle
+              ? `${invoice.vehicle.brand || ''} ${invoice.vehicle.model || ''}`.trim() ||
+                'Véhicule'
+              : 'Prestation',
+          sublabel: invoice.vehicle?.vin ? `VIN : ${invoice.vehicle.vin}` : undefined,
+          quantity: 1,
+          unitPrice: totalAmount,
+          total: totalAmount,
+        },
+      ],
+      from: {
+        name: invoice.company?.name || 'ParcAuto Manager',
+        address: invoice.company?.address || undefined,
+        city: invoice.company?.country ? undefined : undefined,
+        country: invoice.company?.country || undefined,
+        phone: invoice.company?.phone || undefined,
+        email: invoice.company?.email || undefined,
+        legalNumber: invoice.company?.legalNumber || undefined,
+      },
+      to: {
+        name: invoice.client?.name || 'Client',
+        address: invoice.client?.address || undefined,
+        city: invoice.client?.city || undefined,
+        country: invoice.client?.country || undefined,
+        phone: invoice.client?.phone || undefined,
+        email: invoice.client?.email || undefined,
+      },
+      brand: {
+        name: invoice.company?.name,
+        color: invoice.company?.primaryColor || '#6366F1',
+      },
+      notes:
+        paid > 0 && paid < totalAmount
+          ? `Paiement partiel reçu : ${paid.toLocaleString('fr-FR')} FCFA. Solde restant : ${(totalAmount - paid).toLocaleString('fr-FR')} FCFA.`
+          : undefined,
+    };
+
+    const template = typeof req.query.template === 'string' ? req.query.template : 'minimal';
+    const buffer = await renderDocumentPdf(data, { template });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${invoice.invoiceNumber || 'facture'}.pdf"`
+    );
+    return res.send(buffer);
+  } catch (err) {
+    console.error('[invoices.pdf]', err);
+    return res
+      .status(500)
+      .json({ message: 'Erreur lors de la génération du PDF', statusCode: 500 });
   }
 });
 

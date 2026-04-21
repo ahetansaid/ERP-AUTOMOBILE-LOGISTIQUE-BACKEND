@@ -21,3 +21,7 @@ prisma/.tmp/
 
 # Backups
 *.bak
+
+# Test artifacts
+test-*.pdf
+*.test.pdf
