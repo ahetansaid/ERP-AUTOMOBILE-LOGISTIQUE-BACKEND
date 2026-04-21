@@ -1,6 +1,7 @@
 const express = require('express');
 const { getPool } = require('../config/database');
 const { onReceiptInvoice, onReceiptWorkshopQuote } = require('../services/treasuryTransactions');
+const { notify } = require('../services/notifications');
 const router = express.Router();
 
 router.get('/', async (req, res) => {
@@ -262,6 +263,17 @@ router.post('/', async (req, res) => {
       const [invRow] = await pool.execute('SELECT company_id FROM invoices WHERE id = ?', [invoiceId]).catch(() => [[]]);
       const companyId = invRow[0] && invRow[0].company_id;
       if (receiptId) await onReceiptInvoice(companyId, receiptId, amount, paymentDate, reference, vehicleId);
+      // Notification in-app : paiement reçu sur facture
+      const [invInfo] = await pool.execute('SELECT invoice_number FROM invoices WHERE id = ?', [invoiceId]).catch(() => [[]]);
+      const invNumber = (invInfo[0] && invInfo[0].invoice_number) || `#${invoiceId}`;
+      notify({
+        companyId,
+        type: 'SUCCESS',
+        title: 'Paiement reçu',
+        message: `Reçu de ${Number(amount).toLocaleString('fr-FR')} FCFA sur la facture ${invNumber}.`,
+        link: `/comptabilite/factures/${invoiceId}`,
+        audience: 'admins',
+      });
     }
     const createdId = hasDevis
       ? (await pool.execute('SELECT id FROM receipts WHERE workshop_quote_id = ? ORDER BY id DESC LIMIT 1', [devisId]))[0][0].id

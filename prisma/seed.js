@@ -26,6 +26,7 @@ const MODULES = [
   'notifications',
   'users',
   'settings',
+  'uploads',
 ];
 
 const ACTIONS = ['create', 'read', 'update', 'delete', 'export'];

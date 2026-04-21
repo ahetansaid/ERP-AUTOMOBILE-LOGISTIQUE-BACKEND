@@ -18,6 +18,7 @@ const transitRoutes = require('./routes/transit');
 const usersRoutes = require('./routes/users');
 const settingsRoutes = require('./routes/settings');
 const notificationsRoutes = require('./routes/notifications');
+const uploadsRoutes = require('./routes/uploads');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
@@ -38,7 +39,7 @@ app.use(attachAudit);
 
 app.use('/auth', authRoutes);
 
-app.use('/dashboard', authMiddleware, dashboardRoutes);
+app.use('/dashboard', authMiddleware, tenantScope, dashboardRoutes);
 app.use('/vehicles', authMiddleware, tenantScope, vehiclesRoutes);
 app.use('/purchases', authMiddleware, purchasesRoutes);
 app.use('/suppliers', authMiddleware, tenantScope, suppliersRoutes);
@@ -48,15 +49,16 @@ app.use('/devis', authMiddleware, devisRoutes);
 app.use('/invoices', authMiddleware, invoicesRoutes);
 app.use('/receipts', authMiddleware, receiptsRoutes);
 app.use('/treasury', authMiddleware, treasuryRoutes);
-app.use('/proformas', authMiddleware, proformasRoutes);
-app.use('/reports', authMiddleware, reportsRoutes);
-app.use('/transit', authMiddleware, transitRoutes);
+app.use('/proformas', authMiddleware, tenantScope, proformasRoutes);
+app.use('/reports', authMiddleware, tenantScope, reportsRoutes);
+app.use('/transit', authMiddleware, tenantScope, transitRoutes);
 app.use('/users', authMiddleware, usersRoutes);
 app.use('/settings', authMiddleware, settingsRoutes);
-app.use('/notifications', authMiddleware, notificationsRoutes);
+app.use('/notifications', authMiddleware, tenantScope, notificationsRoutes);
+app.use('/uploads', authMiddleware, tenantScope, uploadsRoutes);
 
 app.use('/api/auth', authRoutes);
-app.use('/api/dashboard', authMiddleware, dashboardRoutes);
+app.use('/api/dashboard', authMiddleware, tenantScope, dashboardRoutes);
 app.use('/api/vehicles', authMiddleware, tenantScope, vehiclesRoutes);
 app.use('/api/purchases', authMiddleware, purchasesRoutes);
 app.use('/api/suppliers', authMiddleware, tenantScope, suppliersRoutes);
@@ -66,12 +68,13 @@ app.use('/api/devis', authMiddleware, devisRoutes);
 app.use('/api/invoices', authMiddleware, invoicesRoutes);
 app.use('/api/receipts', authMiddleware, receiptsRoutes);
 app.use('/api/treasury', authMiddleware, treasuryRoutes);
-app.use('/api/proformas', authMiddleware, proformasRoutes);
-app.use('/api/reports', authMiddleware, reportsRoutes);
-app.use('/api/transit', authMiddleware, transitRoutes);
+app.use('/api/proformas', authMiddleware, tenantScope, proformasRoutes);
+app.use('/api/reports', authMiddleware, tenantScope, reportsRoutes);
+app.use('/api/transit', authMiddleware, tenantScope, transitRoutes);
 app.use('/api/users', authMiddleware, usersRoutes);
 app.use('/api/settings', authMiddleware, settingsRoutes);
-app.use('/api/notifications', authMiddleware, notificationsRoutes);
+app.use('/api/notifications', authMiddleware, tenantScope, notificationsRoutes);
+app.use('/api/uploads', authMiddleware, tenantScope, uploadsRoutes);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });

@@ -36,6 +36,7 @@ const ROLE_PERMISSIONS = {
     notifications: ['read', 'update'],
     users: ['read'],
     settings: ['read'],
+    uploads: '*',
   },
   SALES: {
     clients: '*',
@@ -45,6 +46,7 @@ const ROLE_PERMISSIONS = {
     proformas: '*',
     dashboard: ['read'],
     notifications: ['read', 'update'],
+    uploads: ['create', 'read'],
   },
   ACCOUNTING: {
     invoices: '*',
@@ -56,12 +58,14 @@ const ROLE_PERMISSIONS = {
     clients: ['read'],
     vehicles: ['read'],
     notifications: ['read', 'update'],
+    uploads: ['create', 'read'],
   },
   WORKSHOP: {
     workshop_quotes: '*',
     vehicles: ['read', 'update'],
     dashboard: ['read'],
     notifications: ['read', 'update'],
+    uploads: ['create', 'read'],
   },
   LOGISTICS: {
     purchases: '*',
@@ -70,6 +74,7 @@ const ROLE_PERMISSIONS = {
     suppliers: '*',
     dashboard: ['read'],
     notifications: ['read', 'update'],
+    uploads: ['create', 'read'],
   },
   USER: {
     dashboard: ['read'],
