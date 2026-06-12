@@ -14,7 +14,11 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:migrate:baseline": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/0_init/migration.sql",
     "prisma:db:pull": "prisma db pull",
+    "seed": "node prisma/seed.js",
     "postinstall": "prisma generate"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
   },
   "engines": {
     "node": ">=18"
