@@ -6,6 +6,10 @@
 
 generator client {
   provider = "prisma-client-js"
+  // "native" = moteur local (dev). "rhel-openssl-3.0.x" = runtime Linux de
+  // Vercel (serverless). Sans ça, la fonction crashe : "Query engine library
+  // for current platform could not be found".
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
