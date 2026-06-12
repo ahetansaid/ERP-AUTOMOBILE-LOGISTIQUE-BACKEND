@@ -1,13 +1,15 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
+const { authorize } = require('../middleware/rbac');
 // @react-pdf/renderer est lourd : on le charge paresseusement (require dans le
 // handler PDF) pour ne pas l'embarquer dans le démarrage à froid serverless.
 const router = express.Router();
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('invoices', 'read'), async (req, res) => {
   try {
     const rows = await prisma.invoice.findMany({
+      where: { ...req.tenantWhere() },
       orderBy: { id: 'desc' },
       include: {
         client: { select: { name: true } },
@@ -41,11 +43,11 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', authorize('invoices', 'read'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const r = await prisma.invoice.findUnique({
-      where: { id },
+    const r = await prisma.invoice.findFirst({
+      where: { id, ...req.tenantWhere() },
       include: {
         client: { select: { name: true } },
         vehicle: { select: { vin: true, priceSale: true } },
@@ -97,7 +99,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', authorize('invoices', 'create'), async (req, res) => {
   try {
     const body = req.body || {};
     const vehicleId = body.vehicleId ?? body.vehicle_id;
@@ -106,8 +108,11 @@ router.post('/', async (req, res) => {
     const dueDate = body.dueDate ?? body.due_date;
     if (!vehicleId || !clientId || amount == null) return res.status(400).json({ message: 'vehicleId, clientId et amount (ou total_amount) requis', statusCode: 400 });
 
-    const vehicle = await prisma.vehicle.findUnique({ where: { id: Number(vehicleId) }, select: { priceSale: true } });
+    // Véhicule ET client doivent appartenir à la société courante.
+    const vehicle = await prisma.vehicle.findFirst({ where: { id: Number(vehicleId), ...req.tenantWhere() }, select: { priceSale: true } });
     if (!vehicle) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    const clientRow = await prisma.client.findFirst({ where: { id: Number(clientId), ...req.tenantWhere() }, select: { id: true } });
+    if (!clientRow) return res.status(404).json({ message: 'Client introuvable', statusCode: 404 });
     const priceSale = Number(vehicle.priceSale);
     if (priceSale == null || isNaN(priceSale) || priceSale <= 0) {
       return res.status(400).json({
@@ -132,7 +137,7 @@ router.post('/', async (req, res) => {
     // Numéro de facture : FAV-{année}-{séquence 4 chiffres} (séquence par année).
     const y = new Date().getFullYear();
     const yearInvoices = await prisma.invoice.findMany({
-      where: { createdAt: { gte: new Date(y, 0, 1), lt: new Date(y + 1, 0, 1) } },
+      where: { ...req.tenantWhere(), createdAt: { gte: new Date(y, 0, 1), lt: new Date(y + 1, 0, 1) } },
       select: { invoiceNumber: true },
     });
     let maxN = 0;
@@ -145,6 +150,7 @@ router.post('/', async (req, res) => {
 
     await prisma.invoice.create({
       data: {
+        companyId: req.companyId ?? null,
         vehicleId: Number(vehicleId),
         clientId: Number(clientId),
         totalAmount: amountToUse,
@@ -169,11 +175,11 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', authorize('invoices', 'update'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     const body = req.body || {};
-    const inv = await prisma.invoice.findUnique({ where: { id }, select: { id: true, totalAmount: true } });
+    const inv = await prisma.invoice.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true, totalAmount: true } });
     if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
 
     const paidAgg = await prisma.receipt.aggregate({ _sum: { amount: true }, where: { invoiceId: id } });
@@ -218,10 +224,10 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorize('invoices', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const inv = await prisma.invoice.findUnique({ where: { id }, select: { id: true } });
+    const inv = await prisma.invoice.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true } });
     if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
     const paidAgg = await prisma.receipt.aggregate({ _sum: { amount: true }, where: { invoiceId: id } });
     const paid = Number(paidAgg._sum.amount ?? 0);
@@ -238,7 +244,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // GET /invoices/:id/pdf — génère un PDF de la facture (template au choix via ?template=minimal)
-router.get('/:id/pdf', async (req, res) => {
+router.get('/:id/pdf', authorize('invoices', 'read'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) {
@@ -248,8 +254,8 @@ router.get('/:id/pdf', async (req, res) => {
     const { renderDocumentPdf } = require('../pdf/render');
 
     const [invoice, receipts] = await Promise.all([
-      prisma.invoice.findUnique({
-        where: { id },
+      prisma.invoice.findFirst({
+        where: { id, ...req.tenantWhere() },
         include: {
           client: true,
           vehicle: true,

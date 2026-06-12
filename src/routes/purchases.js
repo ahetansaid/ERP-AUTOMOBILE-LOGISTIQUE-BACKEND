@@ -2,6 +2,7 @@ const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
 const { onPurchaseArrival } = require('../services/treasuryTransactions');
+const { authorize } = require('../middleware/rbac');
 
 const router = express.Router();
 
@@ -10,11 +11,10 @@ function vehicleFcfa(v) {
   return Number(v.purchasePrice) || 0;
 }
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('purchases', 'read'), async (req, res) => {
   try {
-    const companyId = req.query.companyId ? Number(req.query.companyId) : req.user?.companyId;
     const rows = await prisma.purchase.findMany({
-      where: companyId ? { companyId } : {},
+      where: { ...req.tenantWhere() },
       orderBy: [{ purchaseDate: 'desc' }, { id: 'desc' }],
       include: {
         purchaseVehicles: {
@@ -54,10 +54,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', authorize('purchases', 'read'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const p = await prisma.purchase.findUnique({ where: { id } });
+    const p = await prisma.purchase.findFirst({ where: { id, ...req.tenantWhere() } });
     if (!p) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
 
     const pvs = await prisma.purchaseVehicle.findMany({
@@ -113,11 +113,12 @@ function mapVehicleFromBody(v) {
   };
 }
 
-router.post('/', async (req, res) => {
+router.post('/', authorize('purchases', 'create'), async (req, res) => {
   try {
-    const companyId = req.body.companyId || req.user?.companyId;
+    // companyId forcé au tenant courant (jamais piloté par le body).
+    const companyId = req.companyId;
     if (companyId == null || companyId === '') {
-      return res.status(400).json({ message: 'companyId requis (body ou JWT). Utilisateur sans societe : creer une company ou passer companyId dans le body.', statusCode: 400 });
+      return res.status(400).json({ message: 'Utilisateur non associé à une société.', statusCode: 400 });
     }
     const body = req.body || {};
     const supplier_name = (body.fournisseurNom || body.supplier_name || '').trim();
@@ -188,10 +189,10 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', authorize('purchases', 'update'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const current = await prisma.purchase.findUnique({ where: { id }, select: { status: true } });
+    const current = await prisma.purchase.findFirst({ where: { id, ...req.tenantWhere() }, select: { status: true } });
     if (!current) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
     if (current.status !== 'EN_COURS') {
       return res.status(409).json({ message: 'Modification autorisée uniquement si statut EN_COURS', statusCode: 409 });
@@ -241,10 +242,10 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-router.patch('/:id/arrive', async (req, res) => {
+router.patch('/:id/arrive', authorize('purchases', 'update'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const current = await prisma.purchase.findUnique({ where: { id }, select: { id: true, status: true, companyId: true } });
+    const current = await prisma.purchase.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true, status: true, companyId: true } });
     if (!current) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
     const wasAlreadyArrive = current.status === 'ARRIVE';
 
@@ -279,10 +280,10 @@ router.patch('/:id/arrive', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorize('purchases', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const current = await prisma.purchase.findUnique({ where: { id }, select: { status: true } });
+    const current = await prisma.purchase.findFirst({ where: { id, ...req.tenantWhere() }, select: { status: true } });
     if (!current) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
     if (current.status !== 'EN_COURS') {
       return res.status(409).json({ message: 'Suppression autorisée uniquement si statut EN_COURS', statusCode: 409 });

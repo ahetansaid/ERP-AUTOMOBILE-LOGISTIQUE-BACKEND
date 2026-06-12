@@ -1,11 +1,13 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
+const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('workshop_quotes', 'read'), async (req, res) => {
   try {
     const quotes = await prisma.workshopQuote.findMany({
+      where: { ...req.tenantWhere() },
       orderBy: { id: 'desc' },
       include: {
         vehicle: { select: { vin: true, brand: true, model: true } },
@@ -41,17 +43,24 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', authorize('workshop_quotes', 'create'), async (req, res) => {
   try {
     const b = req.body || {};
     if (!b.vehicleId || !b.prestataire || b.amount == null) return res.status(400).json({ message: 'vehicleId, prestataire et amount requis', statusCode: 400 });
+    // Le véhicule doit appartenir à la société courante (anti cross-tenant).
+    const vehicle = await prisma.vehicle.findFirst({
+      where: { id: Number(b.vehicleId), ...req.tenantWhere() },
+      select: { id: true },
+    });
+    if (!vehicle) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
     const existing = await prisma.workshopQuote.findFirst({
-      where: { vehicleId: Number(b.vehicleId), status: { not: 'TERMINE' } },
+      where: { vehicleId: Number(b.vehicleId), status: { not: 'TERMINE' }, ...req.tenantWhere() },
       select: { id: true },
     });
     if (existing) return res.status(409).json({ message: 'Devis actif existant', statusCode: 409 });
     const created = await prisma.workshopQuote.create({
       data: {
+        companyId: req.companyId ?? null,
         vehicleId: Number(b.vehicleId),
         prestataire: b.prestataire,
         amount: b.amount,

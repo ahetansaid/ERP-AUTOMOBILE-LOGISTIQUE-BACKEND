@@ -1,10 +1,11 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
+const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
-router.get('/rates', async (req, res) => {
+router.get('/rates', authorize('settings', 'read'), async (req, res) => {
   try {
-    const companyId = req.query.companyId || req.user?.companyId;
+    const companyId = req.companyId;
     try {
       const rows = await prisma.exchangeRate.findMany({
         where: {
@@ -27,10 +28,10 @@ router.get('/rates', async (req, res) => {
   }
 });
 
-router.put('/rates', async (req, res) => {
+router.put('/rates', authorize('settings', 'update'), async (req, res) => {
   try {
     const { USD, EUR } = req.body || {};
-    const companyId = req.body.companyId || req.user?.companyId;
+    const companyId = req.companyId;
     const companyWhere = companyId ? { companyId: Number(companyId) } : {};
     try {
       if (USD != null) {
@@ -50,7 +51,7 @@ router.put('/rates', async (req, res) => {
     let rows = [];
     try {
       rows = await prisma.exchangeRate.findMany({
-        where: { isActive: true },
+        where: { isActive: true, ...companyWhere },
         select: { currency: true, rateFcfa: true },
       });
     } catch (e) {

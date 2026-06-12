@@ -3,6 +3,23 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'refresh-change-me';
 
+// Fail-fast en production : refuse de démarrer avec des secrets faibles/par défaut.
+if (process.env.NODE_ENV === 'production') {
+  const weak = [
+    !process.env.JWT_SECRET,
+    !process.env.JWT_REFRESH_SECRET,
+    JWT_SECRET === 'change-me-in-production',
+    JWT_REFRESH_SECRET === 'refresh-change-me',
+    JWT_SECRET.length < 32,
+  ].some(Boolean);
+  if (weak) {
+    throw new Error(
+      'JWT_SECRET / JWT_REFRESH_SECRET manquants ou trop faibles en production. ' +
+        'Définissez des secrets forts (>= 32 caractères) dans les variables d\'environnement.'
+    );
+  }
+}
+
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   let token = null;

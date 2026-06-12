@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const authRoutes = require('./routes/auth');
 const dashboardRoutes = require('./routes/dashboard');
 const vehiclesRoutes = require('./routes/vehicles');
@@ -49,48 +51,51 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
+// En-têtes de sécurité (HSTS, X-Content-Type-Options, etc.).
+// crossOriginResourcePolicy désactivé : API consommée cross-origin (frontend).
+app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors(corsOptions));
-app.use(express.json());
+// Derrière le proxy Vercel : nécessaire pour que le rate-limit identifie l'IP réelle.
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '1mb' }));
 app.use(attachAudit);
 
-app.use('/auth', authRoutes);
+// Rate limiting agressif sur l'authentification (anti brute-force / credential stuffing).
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 20, // 20 tentatives / IP / fenêtre
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Trop de tentatives. Réessayez dans quelques minutes.', statusCode: 429 },
+});
 
-app.use('/dashboard', authMiddleware, tenantScope, dashboardRoutes);
-app.use('/vehicles', authMiddleware, tenantScope, vehiclesRoutes);
-app.use('/purchases', authMiddleware, purchasesRoutes);
-app.use('/suppliers', authMiddleware, tenantScope, suppliersRoutes);
-app.use('/clients', authMiddleware, tenantScope, clientsRoutes);
-app.use('/charges', authMiddleware, chargesRoutes);
-app.use('/devis', authMiddleware, devisRoutes);
-app.use('/invoices', authMiddleware, invoicesRoutes);
-app.use('/receipts', authMiddleware, receiptsRoutes);
-app.use('/treasury', authMiddleware, treasuryRoutes);
-app.use('/proformas', authMiddleware, tenantScope, proformasRoutes);
-app.use('/reports', authMiddleware, tenantScope, reportsRoutes);
-app.use('/transit', authMiddleware, tenantScope, transitRoutes);
-app.use('/users', authMiddleware, usersRoutes);
-app.use('/settings', authMiddleware, settingsRoutes);
-app.use('/notifications', authMiddleware, tenantScope, notificationsRoutes);
-app.use('/uploads', authMiddleware, tenantScope, uploadsRoutes);
+// Toutes les routes authentifiées passent désormais par tenantScope
+// (isolation multi-société) en plus de authMiddleware.
+const guarded = [authMiddleware, tenantScope];
 
-app.use('/api/auth', authRoutes);
-app.use('/api/dashboard', authMiddleware, tenantScope, dashboardRoutes);
-app.use('/api/vehicles', authMiddleware, tenantScope, vehiclesRoutes);
-app.use('/api/purchases', authMiddleware, purchasesRoutes);
-app.use('/api/suppliers', authMiddleware, tenantScope, suppliersRoutes);
-app.use('/api/clients', authMiddleware, tenantScope, clientsRoutes);
-app.use('/api/charges', authMiddleware, chargesRoutes);
-app.use('/api/devis', authMiddleware, devisRoutes);
-app.use('/api/invoices', authMiddleware, invoicesRoutes);
-app.use('/api/receipts', authMiddleware, receiptsRoutes);
-app.use('/api/treasury', authMiddleware, treasuryRoutes);
-app.use('/api/proformas', authMiddleware, tenantScope, proformasRoutes);
-app.use('/api/reports', authMiddleware, tenantScope, reportsRoutes);
-app.use('/api/transit', authMiddleware, tenantScope, transitRoutes);
-app.use('/api/users', authMiddleware, usersRoutes);
-app.use('/api/settings', authMiddleware, settingsRoutes);
-app.use('/api/notifications', authMiddleware, tenantScope, notificationsRoutes);
-app.use('/api/uploads', authMiddleware, tenantScope, uploadsRoutes);
+function mount(prefix) {
+  app.use(`${prefix}/auth`, authLimiter, authRoutes);
+  app.use(`${prefix}/dashboard`, ...guarded, dashboardRoutes);
+  app.use(`${prefix}/vehicles`, ...guarded, vehiclesRoutes);
+  app.use(`${prefix}/purchases`, ...guarded, purchasesRoutes);
+  app.use(`${prefix}/suppliers`, ...guarded, suppliersRoutes);
+  app.use(`${prefix}/clients`, ...guarded, clientsRoutes);
+  app.use(`${prefix}/charges`, ...guarded, chargesRoutes);
+  app.use(`${prefix}/devis`, ...guarded, devisRoutes);
+  app.use(`${prefix}/invoices`, ...guarded, invoicesRoutes);
+  app.use(`${prefix}/receipts`, ...guarded, receiptsRoutes);
+  app.use(`${prefix}/treasury`, ...guarded, treasuryRoutes);
+  app.use(`${prefix}/proformas`, ...guarded, proformasRoutes);
+  app.use(`${prefix}/reports`, ...guarded, reportsRoutes);
+  app.use(`${prefix}/transit`, ...guarded, transitRoutes);
+  app.use(`${prefix}/users`, ...guarded, usersRoutes);
+  app.use(`${prefix}/settings`, ...guarded, settingsRoutes);
+  app.use(`${prefix}/notifications`, ...guarded, notificationsRoutes);
+  app.use(`${prefix}/uploads`, ...guarded, uploadsRoutes);
+}
+
+mount('');
+mount('/api');
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });

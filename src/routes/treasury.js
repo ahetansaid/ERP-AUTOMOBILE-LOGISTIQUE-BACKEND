@@ -1,5 +1,6 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
+const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
 // Borne basse de période (équivalent des filtres MySQL DATE_SUB / DATE_FORMAT).
@@ -26,9 +27,9 @@ function ym(date) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('treasury', 'read'), async (req, res) => {
   try {
-    const companyId = req.query.companyId ? Number(req.query.companyId) : req.user?.companyId;
+    const companyId = req.companyId;
     const period = req.query.period || req.query.periode || '';
     const since = periodSince(period);
 

@@ -13,7 +13,8 @@ function midnightDaysAgo(n) {
 
 router.get('/stats', async (req, res) => {
   try {
-    const companyId = req.query.companyId ? Number(req.query.companyId) : req.user?.companyId;
+    // req.companyId vient de tenantScope (override ?companyId réservé aux ADMIN).
+    const companyId = req.companyId;
     const vehicleWhere = companyId ? { companyId } : {};
     const receiptWhere = companyId ? { companyId } : {};
 

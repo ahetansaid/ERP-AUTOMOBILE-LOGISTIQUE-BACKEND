@@ -2,11 +2,13 @@ const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
 const { onChargeCreated } = require('../services/treasuryTransactions');
+const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('charges', 'read'), async (req, res) => {
   try {
     const rows = await prisma.charge.findMany({
+      where: { ...req.tenantWhere() },
       orderBy: { chargeDate: 'desc' },
     });
     return res.status(200).json({ charges: toSnake(rows), pagination: {} });
@@ -16,11 +18,11 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', authorize('charges', 'create'), async (req, res) => {
   try {
     const { label, category, amount, chargeDate, charge_date } = req.body || {};
     if (!label || amount == null) return res.status(400).json({ message: 'label et amount requis', statusCode: 400 });
-    const companyId = req.query.companyId || req.user?.companyId || null;
+    const companyId = req.companyId ?? null;
     const d = chargeDate || charge_date || new Date();
     const dateStr = typeof d === 'string' && d.match(/^\d{4}-\d{2}-\d{2}/) ? d.slice(0, 10) : (d instanceof Date ? d.toISOString().slice(0, 10) : null) || null;
     const effectiveDate = dateStr || (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
@@ -45,10 +47,11 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorize('charges', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const existing = await prisma.charge.findUnique({ where: { id }, select: { id: true } });
+    // findFirst + tenantWhere : empêche la suppression d'une charge d'une autre société (IDOR).
+    const existing = await prisma.charge.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true } });
     if (!existing) return res.status(404).json({ message: 'Charge introuvable', statusCode: 404 });
     await prisma.charge.delete({ where: { id } });
     return res.status(204).send();

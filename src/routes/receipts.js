@@ -3,6 +3,7 @@ const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
 const { onReceiptInvoice, onReceiptWorkshopQuote } = require('../services/treasuryTransactions');
 const { notify } = require('../services/notifications');
+const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
 function sortByDateThenId(a, b) {
@@ -12,9 +13,10 @@ function sortByDateThenId(a, b) {
   return (a.id || 0) - (b.id || 0);
 }
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('receipts', 'read'), async (req, res) => {
   try {
     const rows = await prisma.receipt.findMany({
+      where: { ...req.tenantWhere() },
       orderBy: [{ paymentDate: 'desc' }, { id: 'desc' }],
       include: {
         invoice: {
@@ -144,7 +146,7 @@ async function sumReceipts(where) {
   return Number(agg._sum.amount ?? 0);
 }
 
-router.post('/', async (req, res) => {
+router.post('/', authorize('receipts', 'create'), async (req, res) => {
   try {
     const raw = req.body || {};
     const body = raw.data && typeof raw.data === 'object' ? { ...raw.data, ...raw } : raw;
@@ -211,8 +213,8 @@ router.post('/', async (req, res) => {
 
     let created;
     if (hasDevis) {
-      const q = await prisma.workshopQuote.findUnique({
-        where: { id: Number(devisId) },
+      const q = await prisma.workshopQuote.findFirst({
+        where: { id: Number(devisId), ...req.tenantWhere() },
         select: { id: true, amount: true, companyId: true, vehicleId: true, closedAt: true },
       });
       if (!q) return res.status(404).json({ message: 'Devis introuvable', statusCode: 404 });
@@ -235,6 +237,7 @@ router.post('/', async (req, res) => {
       }
       created = await prisma.receipt.create({
         data: {
+          companyId: req.companyId ?? null,
           workshopQuoteId: Number(devisId),
           amount,
           paymentMethod,
@@ -251,8 +254,8 @@ router.post('/', async (req, res) => {
       }
       if (created.id) await onReceiptWorkshopQuote(q.companyId, created.id, amount, paymentDate, reference, q.vehicleId, Number(devisId));
     } else {
-      const inv = await prisma.invoice.findUnique({
-        where: { id: Number(invoiceId) },
+      const inv = await prisma.invoice.findFirst({
+        where: { id: Number(invoiceId), ...req.tenantWhere() },
         select: { id: true, vehicleId: true, companyId: true, invoiceNumber: true, vehicle: { select: { priceSale: true } } },
       });
       if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
@@ -276,6 +279,7 @@ router.post('/', async (req, res) => {
       }
       created = await prisma.receipt.create({
         data: {
+          companyId: req.companyId ?? null,
           invoiceId: Number(invoiceId),
           amount,
           paymentMethod,
@@ -303,7 +307,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', authorize('receipts', 'update'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     const body = req.body || {};
@@ -313,7 +317,7 @@ router.patch('/:id', async (req, res) => {
     const paymentDate = paymentDateRaw != null && paymentDateRaw !== '' ? toDateOnly(paymentDateRaw) : undefined;
     const reference = body.reference !== undefined ? String(body.reference).trim() : undefined;
 
-    const existing = await prisma.receipt.findUnique({ where: { id }, select: { id: true } });
+    const existing = await prisma.receipt.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true } });
     if (!existing) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
 
     const data = {};
@@ -334,10 +338,10 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorize('receipts', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const existing = await prisma.receipt.findUnique({ where: { id }, select: { id: true } });
+    const existing = await prisma.receipt.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true } });
     if (!existing) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
     await prisma.receipt.delete({ where: { id } });
     return res.status(204).send();
