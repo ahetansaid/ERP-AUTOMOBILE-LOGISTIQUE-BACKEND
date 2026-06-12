@@ -1,7 +1,8 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
-const { renderDocumentPdf } = require('../pdf/render');
+// @react-pdf/renderer est lourd : on le charge paresseusement (require dans le
+// handler PDF) pour ne pas l'embarquer dans le démarrage à froid serverless.
 const router = express.Router();
 
 router.get('/', async (req, res) => {
@@ -243,6 +244,8 @@ router.get('/:id/pdf', async (req, res) => {
     if (!Number.isInteger(id)) {
       return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
     }
+
+    const { renderDocumentPdf } = require('../pdf/render');
 
     const [invoice, receipts] = await Promise.all([
       prisma.invoice.findUnique({
