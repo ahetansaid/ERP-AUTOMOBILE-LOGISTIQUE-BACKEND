@@ -1,7 +1,7 @@
 // ============================================================================
 // ParcAuto Manager — Schéma Prisma
-// Base : MySQL 5.7+ / 8.x (UTF8MB4, collation utf8mb4_unicode_ci)
-// Généré depuis scripts/create_database_complete.sql + extensions Phase 0
+// Base : PostgreSQL (Neon serverless)
+// Migré depuis MySQL — voir docs/DEPLOIEMENT-VERCEL-NEON.md
 // ============================================================================
 
 generator client {
@@ -9,8 +9,11 @@ generator client {
 }
 
 datasource db {
-  provider = "mysql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // URL de connexion directe (non poolée) pour `prisma migrate deploy`.
+  // Sur Neon : DATABASE_URL = host -pooler ; DIRECT_URL = host direct.
+  directUrl = env("DIRECT_URL")
 }
 
 // ============================================================================
@@ -76,16 +79,6 @@ enum TreasuryTxType {
   DECAISSEMENT
 }
 
-enum TransitStepName {
-  DEVIS
-  RESERVE
-  EMBARQUE
-  EN_TRANSIT
-  DEDOUANEMENT
-  LIVRE
-  ARCHIVE
-}
-
 enum NotificationType {
   INFO
   WARNING
@@ -148,7 +141,7 @@ enum EmailStatus {
 // ============================================================================
 
 model Company {
-  id              Int       @id @default(autoincrement()) @db.UnsignedInt
+  id              Int       @id @default(autoincrement())
   name            String    @db.VarChar(255)
   address         String?   @db.Text
   phone           String?   @db.VarChar(50)
@@ -161,8 +154,8 @@ model Company {
   legalNumber     String?   @map("legal_number") @db.VarChar(100) // IFU / RCCM
   country         String?   @db.VarChar(100)
   defaultCurrency String?   @map("default_currency") @db.VarChar(10)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt       DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime? @updatedAt @map("updated_at")
 
   users            User[]
   suppliers        Supplier[]
@@ -189,21 +182,21 @@ model Company {
 // ============================================================================
 
 model User {
-  id           Int       @id @default(autoincrement()) @db.UnsignedInt
+  id           Int       @id @default(autoincrement())
   email        String    @unique(map: "uk_users_email") @db.VarChar(255)
   password     String    @db.VarChar(255)
   firstName    String?   @map("first_name") @db.VarChar(100)
   lastName     String?   @map("last_name") @db.VarChar(100)
   role         UserRole  @default(USER)
-  companyId    Int?      @map("company_id") @db.UnsignedInt
-  isActive     Boolean   @default(true) @map("is_active") @db.TinyInt
+  companyId    Int?      @map("company_id")
+  isActive     Boolean   @default(true) @map("is_active")
   // Phase 0 additions
-  twoFaEnabled Boolean   @default(false) @map("two_fa_enabled") @db.TinyInt
+  twoFaEnabled Boolean   @default(false) @map("two_fa_enabled")
   twoFaSecret  String?   @map("two_fa_secret") @db.VarChar(255)
-  lastLoginAt  DateTime? @map("last_login_at") @db.DateTime(0)
+  lastLoginAt  DateTime? @map("last_login_at")
   avatarUrl    String?   @map("avatar_url") @db.VarChar(500)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt    DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime? @updatedAt @map("updated_at")
 
   company             Company?             @relation(fields: [companyId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   sessions            Session[]
@@ -219,7 +212,7 @@ model User {
 
 // Fine-grained permissions assignées à un utilisateur au-delà de son rôle
 model Permission {
-  id          Int     @id @default(autoincrement()) @db.UnsignedInt
+  id          Int     @id @default(autoincrement())
   code        String  @unique(map: "uk_permissions_code") @db.VarChar(100) // ex: invoices.create
   module      String  @db.VarChar(50) // ex: invoices
   action      String  @db.VarChar(50) // ex: create, read, update, delete, export
@@ -232,10 +225,10 @@ model Permission {
 }
 
 model UserPermission {
-  userId       Int      @map("user_id") @db.UnsignedInt
-  permissionId Int      @map("permission_id") @db.UnsignedInt
-  grantedAt    DateTime @default(now()) @map("granted_at") @db.DateTime(0)
-  grantedBy    Int?     @map("granted_by") @db.UnsignedInt
+  userId       Int      @map("user_id")
+  permissionId Int      @map("permission_id")
+  grantedAt    DateTime @default(now()) @map("granted_at")
+  grantedBy    Int?     @map("granted_by")
 
   user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
@@ -245,14 +238,14 @@ model UserPermission {
 }
 
 model Session {
-  id           Int       @id @default(autoincrement()) @db.UnsignedInt
-  userId       Int       @map("user_id") @db.UnsignedInt
+  id           Int       @id @default(autoincrement())
+  userId       Int       @map("user_id")
   refreshToken String    @unique(map: "uk_sessions_refresh") @map("refresh_token") @db.VarChar(512)
   userAgent    String?   @map("user_agent") @db.VarChar(500)
   ipAddress    String?   @map("ip_address") @db.VarChar(45)
-  expiresAt    DateTime  @map("expires_at") @db.DateTime(0)
-  revokedAt    DateTime? @map("revoked_at") @db.DateTime(0)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -262,12 +255,12 @@ model Session {
 }
 
 model PasswordResetToken {
-  id        Int       @id @default(autoincrement()) @db.UnsignedInt
-  userId    Int       @map("user_id") @db.UnsignedInt
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
   token     String    @unique(map: "uk_prt_token") @db.VarChar(255)
-  expiresAt DateTime  @map("expires_at") @db.DateTime(0)
-  usedAt    DateTime? @map("used_at") @db.DateTime(0)
-  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -280,17 +273,17 @@ model PasswordResetToken {
 // ============================================================================
 
 model AuditLog {
-  id         BigInt      @id @default(autoincrement()) @db.UnsignedBigInt
-  companyId  Int?        @map("company_id") @db.UnsignedInt
-  userId     Int?        @map("user_id") @db.UnsignedInt
+  id         BigInt      @id @default(autoincrement())
+  companyId  Int?        @map("company_id")
+  userId     Int?        @map("user_id")
   action     AuditAction
   resource   String      @db.VarChar(100) // ex: invoices
-  resourceId Int?        @map("resource_id") @db.UnsignedInt
-  before     Json?       @db.Json
-  after      Json?       @db.Json
+  resourceId Int?        @map("resource_id")
+  before     Json?       @db.JsonB
+  after      Json?       @db.JsonB
   ipAddress  String?     @map("ip_address") @db.VarChar(45)
   userAgent  String?     @map("user_agent") @db.VarChar(500)
-  createdAt  DateTime    @default(now()) @map("created_at") @db.DateTime(0)
+  createdAt  DateTime    @default(now()) @map("created_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
   user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
@@ -307,15 +300,15 @@ model AuditLog {
 // ============================================================================
 
 model Supplier {
-  id          Int       @id @default(autoincrement()) @db.UnsignedInt
-  companyId   Int?      @map("company_id") @db.UnsignedInt
+  id          Int       @id @default(autoincrement())
+  companyId   Int?      @map("company_id")
   name        String    @db.VarChar(255)
   contactName String?   @map("contact_name") @db.VarChar(255)
   email       String?   @db.VarChar(255)
   phone       String?   @db.VarChar(50)
   address     String?   @db.Text
-  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt   DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime? @updatedAt @map("updated_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
 
@@ -324,8 +317,8 @@ model Supplier {
 }
 
 model Client {
-  id          Int          @id @default(autoincrement()) @db.UnsignedInt
-  companyId   Int?         @map("company_id") @db.UnsignedInt
+  id          Int          @id @default(autoincrement())
+  companyId   Int?         @map("company_id")
   name        String       @db.VarChar(255)
   email       String?      @db.VarChar(255)
   phone       String?      @db.VarChar(50)
@@ -335,8 +328,8 @@ model Client {
   notes       String?      @db.Text
   status      ClientStatus @default(ACTIF)
   contactName String?      @map("contact_name") @db.VarChar(255)
-  createdAt   DateTime     @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt   DateTime?    @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime?    @updatedAt @map("updated_at")
 
   company   Company?   @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicles  Vehicle[]
@@ -352,25 +345,25 @@ model Client {
 // ============================================================================
 
 model Vehicle {
-  id                Int           @id @default(autoincrement()) @db.UnsignedInt
-  companyId         Int?          @map("company_id") @db.UnsignedInt
+  id                Int           @id @default(autoincrement())
+  companyId         Int?          @map("company_id")
   vin               String?       @db.VarChar(50)
   brand             String?       @db.VarChar(100)
   model             String?       @db.VarChar(100)
-  year              Int?          @db.UnsignedSmallInt
+  year              Int?
   color             String?       @db.VarChar(50)
   status            VehicleStatus @default(DISPONIBLE)
   purchasePrice     Decimal       @default(0) @map("purchase_price") @db.Decimal(15, 2)
   purchasePriceFcfa Decimal?      @map("purchase_price_fcfa") @db.Decimal(15, 2)
   transportFees     Decimal       @default(0) @map("transport_fees") @db.Decimal(15, 2)
   priceSale         Decimal?      @map("price_sale") @db.Decimal(15, 2)
-  clientId          Int?          @map("client_id") @db.UnsignedInt
+  clientId          Int?          @map("client_id")
   // Phase 1 additions
-  mileage           Int?          @db.UnsignedInt
+  mileage           Int?
   registration      String?       @db.VarChar(50)
   countryOrigin     String?       @map("country_origin") @db.VarChar(100)
-  createdAt         DateTime      @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt         DateTime?     @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime?     @updatedAt @map("updated_at")
 
   company          Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
   client           Client?               @relation(fields: [clientId], references: [id], onDelete: SetNull)
@@ -389,8 +382,8 @@ model Vehicle {
 }
 
 model Purchase {
-  id                 Int            @id @default(autoincrement()) @db.UnsignedInt
-  companyId          Int            @map("company_id") @db.UnsignedInt
+  id                 Int            @id @default(autoincrement())
+  companyId          Int            @map("company_id")
   supplierName       String?        @map("supplier_name") @db.VarChar(255)
   purchaseDate       DateTime?      @map("purchase_date") @db.Date
   containerReference String?        @map("container_reference") @db.VarChar(100)
@@ -399,8 +392,8 @@ model Purchase {
   currency           String         @default("FCFA") @db.VarChar(10)
   status             PurchaseStatus @default(EN_COURS)
   arrivalDate        DateTime?      @map("arrival_date") @db.Date
-  createdAt          DateTime       @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt          DateTime?      @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime?      @updatedAt @map("updated_at")
 
   company          Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
   purchaseVehicles PurchaseVehicle[]
@@ -412,10 +405,10 @@ model Purchase {
 }
 
 model PurchaseVehicle {
-  id         Int      @id @default(autoincrement()) @db.UnsignedInt
-  purchaseId Int      @map("purchase_id") @db.UnsignedInt
-  vehicleId  Int      @map("vehicle_id") @db.UnsignedInt
-  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  id         Int      @id @default(autoincrement())
+  purchaseId Int      @map("purchase_id")
+  vehicleId  Int      @map("vehicle_id")
+  createdAt  DateTime @default(now()) @map("created_at")
 
   purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
   vehicle  Vehicle  @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
@@ -430,16 +423,16 @@ model PurchaseVehicle {
 // ============================================================================
 
 model Invoice {
-  id            Int           @id @default(autoincrement()) @db.UnsignedInt
-  companyId     Int?          @map("company_id") @db.UnsignedInt
-  vehicleId     Int           @unique(map: "uk_invoices_vehicle") @map("vehicle_id") @db.UnsignedInt
-  clientId      Int           @map("client_id") @db.UnsignedInt
+  id            Int           @id @default(autoincrement())
+  companyId     Int?          @map("company_id")
+  vehicleId     Int           @unique(map: "uk_invoices_vehicle") @map("vehicle_id")
+  clientId      Int           @map("client_id")
   totalAmount   Decimal       @map("total_amount") @db.Decimal(15, 2)
   invoiceNumber String        @map("invoice_number") @db.VarChar(50)
   dueDate       DateTime?     @map("due_date") @db.Date
   status        InvoiceStatus @default(EMISE)
-  createdAt     DateTime      @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt     DateTime?     @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime?     @updatedAt @map("updated_at")
 
   company  Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicle  Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
@@ -453,15 +446,15 @@ model Invoice {
 }
 
 model Receipt {
-  id              Int      @id @default(autoincrement()) @db.UnsignedInt
-  companyId       Int?     @map("company_id") @db.UnsignedInt
-  invoiceId       Int?     @map("invoice_id") @db.UnsignedInt
-  workshopQuoteId Int?     @map("workshop_quote_id") @db.UnsignedInt
+  id              Int      @id @default(autoincrement())
+  companyId       Int?     @map("company_id")
+  invoiceId       Int?     @map("invoice_id")
+  workshopQuoteId Int?     @map("workshop_quote_id")
   amount          Decimal  @db.Decimal(15, 2)
   paymentMethod   String?  @map("payment_method") @db.VarChar(50)
   paymentDate     DateTime @map("payment_date") @db.Date
   reference       String?  @db.VarChar(100)
-  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  createdAt       DateTime @default(now()) @map("created_at")
 
   company       Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
   invoice       Invoice?              @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
@@ -475,16 +468,16 @@ model Receipt {
 }
 
 model Charge {
-  id             Int       @id @default(autoincrement()) @db.UnsignedInt
-  companyId      Int?      @map("company_id") @db.UnsignedInt
+  id             Int       @id @default(autoincrement())
+  companyId      Int?      @map("company_id")
   label          String    @db.VarChar(255)
   category       String?   @db.VarChar(100)
   amount         Decimal   @db.Decimal(15, 2)
   chargeDate     DateTime  @map("charge_date") @db.Date
   deletionReason String?   @map("deletion_reason") @db.Text
-  deletedAt      DateTime? @map("deleted_at") @db.DateTime(0)
-  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt      DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+  deletedAt      DateTime? @map("deleted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
 
   company     Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
   treasuryTxs TreasuryTransaction[]
@@ -495,18 +488,18 @@ model Charge {
 }
 
 model WorkshopQuote {
-  id          Int                 @id @default(autoincrement()) @db.UnsignedInt
-  companyId   Int?                @map("company_id") @db.UnsignedInt
-  vehicleId   Int                 @map("vehicle_id") @db.UnsignedInt
+  id          Int                 @id @default(autoincrement())
+  companyId   Int?                @map("company_id")
+  vehicleId   Int                 @map("vehicle_id")
   prestataire String              @db.VarChar(255)
   amount      Decimal             @db.Decimal(15, 2)
   currency    String              @default("FCFA") @db.VarChar(10)
   description String?             @db.Text
   validUntil  DateTime?           @map("valid_until") @db.Date
   status      WorkshopQuoteStatus @default(EN_ATTENTE)
-  closedAt    DateTime?           @map("closed_at") @db.DateTime(0)
-  createdAt   DateTime            @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt   DateTime?           @updatedAt @map("updated_at") @db.DateTime(0)
+  closedAt    DateTime?           @map("closed_at")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime?           @updatedAt @map("updated_at")
 
   company     Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicle     Vehicle               @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
@@ -520,15 +513,15 @@ model WorkshopQuote {
 }
 
 model Proforma {
-  id             Int             @id @default(autoincrement()) @db.UnsignedInt
-  companyId      Int?            @map("company_id") @db.UnsignedInt
-  vehicleId      Int?            @map("vehicle_id") @db.UnsignedInt
-  clientId       Int?            @map("client_id") @db.UnsignedInt
+  id             Int             @id @default(autoincrement())
+  companyId      Int?            @map("company_id")
+  vehicleId      Int?            @map("vehicle_id")
+  clientId       Int?            @map("client_id")
   totalAmount    Decimal?        @map("total_amount") @db.Decimal(15, 2)
   proformaNumber String?         @map("proforma_number") @db.VarChar(50)
   status         ProformaStatus? @default(BROUILLON)
-  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt      DateTime?       @updatedAt @map("updated_at") @db.DateTime(0)
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime?       @updatedAt @map("updated_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicle Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
@@ -545,13 +538,16 @@ model Proforma {
 // ============================================================================
 
 model TransitStep {
-  id            Int             @id @default(autoincrement()) @db.UnsignedInt
-  vehicleId     Int?            @map("vehicle_id") @db.UnsignedInt
-  stepName      TransitStepName @map("step_name")
-  dateArrival   DateTime?       @map("date_arrival") @db.Date
-  dateDeparture DateTime?       @map("date_departure") @db.Date
-  createdAt     DateTime        @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt     DateTime?       @updatedAt @map("updated_at") @db.DateTime(0)
+  id            Int       @id @default(autoincrement())
+  vehicleId     Int?      @map("vehicle_id")
+  // String (et non enum) : l'application utilise un jeu de valeurs d'étapes
+  // (ARRIVEE_PORT, MAINLEVEE, ...) distinct de l'ancien enum. Postgres rejette
+  // les valeurs hors enum, donc on garde un VarChar libre.
+  stepName      String    @map("step_name") @db.VarChar(50)
+  dateArrival   DateTime? @map("date_arrival") @db.Date
+  dateDeparture DateTime? @map("date_departure") @db.Date
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime? @updatedAt @map("updated_at")
 
   vehicle Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
@@ -565,20 +561,20 @@ model TransitStep {
 // ============================================================================
 
 model TreasuryTransaction {
-  id              Int            @id @default(autoincrement()) @db.UnsignedInt
-  companyId       Int?           @map("company_id") @db.UnsignedInt
+  id              Int            @id @default(autoincrement())
+  companyId       Int?           @map("company_id")
   type            TreasuryTxType
   categorie       String         @db.VarChar(80)
   reference       String?        @db.VarChar(100)
   montant         Decimal        @db.Decimal(15, 2)
   transactionDate DateTime       @map("transaction_date") @db.Date
-  vehicleId       Int?           @map("vehicle_id") @db.UnsignedInt
+  vehicleId       Int?           @map("vehicle_id")
   description     String?        @db.Text
-  receiptId       Int?           @map("receipt_id") @db.UnsignedInt
-  purchaseId      Int?           @map("purchase_id") @db.UnsignedInt
-  workshopQuoteId Int?           @map("workshop_quote_id") @db.UnsignedInt
-  chargeId        Int?           @map("charge_id") @db.UnsignedInt
-  createdAt       DateTime       @default(now()) @map("created_at") @db.DateTime(0)
+  receiptId       Int?           @map("receipt_id")
+  purchaseId      Int?           @map("purchase_id")
+  workshopQuoteId Int?           @map("workshop_quote_id")
+  chargeId        Int?           @map("charge_id")
+  createdAt       DateTime       @default(now()) @map("created_at")
 
   company       Company?       @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicle       Vehicle?       @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
@@ -602,13 +598,13 @@ model TreasuryTransaction {
 // ============================================================================
 
 model ExchangeRate {
-  id        Int       @id @default(autoincrement()) @db.UnsignedInt
-  companyId Int?      @map("company_id") @db.UnsignedInt
+  id        Int       @id @default(autoincrement())
+  companyId Int?      @map("company_id")
   currency  String    @db.VarChar(10)
   rateFcfa  Decimal   @map("rate_fcfa") @db.Decimal(15, 4)
-  isActive  Boolean   @default(true) @map("is_active") @db.TinyInt
-  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
-  updatedAt DateTime? @updatedAt @map("updated_at") @db.DateTime(0)
+  isActive  Boolean   @default(true) @map("is_active")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @updatedAt @map("updated_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
 
@@ -618,14 +614,14 @@ model ExchangeRate {
 }
 
 model GeneratedReport {
-  id          Int       @id @default(autoincrement()) @db.UnsignedInt
-  companyId   Int?      @map("company_id") @db.UnsignedInt
+  id          Int       @id @default(autoincrement())
+  companyId   Int?      @map("company_id")
   name        String?   @db.VarChar(255)
   type        String?   @db.VarChar(50)
   periodStart DateTime? @map("period_start") @db.Date
   periodEnd   DateTime? @map("period_end") @db.Date
   filePath    String?   @map("file_path") @db.VarChar(500)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  createdAt   DateTime  @default(now()) @map("created_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
 
@@ -639,15 +635,15 @@ model GeneratedReport {
 // ============================================================================
 
 model Notification {
-  id        Int              @id @default(autoincrement()) @db.UnsignedInt
-  userId    Int?             @map("user_id") @db.UnsignedInt
-  companyId Int?             @map("company_id") @db.UnsignedInt
+  id        Int              @id @default(autoincrement())
+  userId    Int?             @map("user_id")
+  companyId Int?             @map("company_id")
   type      NotificationType @default(INFO)
   title     String?          @db.VarChar(255)
   message   String?          @db.Text
   link      String?          @db.VarChar(500)
-  read      Boolean          @default(false) @db.TinyInt
-  createdAt DateTime         @default(now()) @map("created_at") @db.DateTime(0)
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now()) @map("created_at")
 
   user    User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
@@ -663,8 +659,8 @@ model Notification {
 // ============================================================================
 
 model EmailEvent {
-  id         BigInt      @id @default(autoincrement()) @db.UnsignedBigInt
-  companyId  Int?        @map("company_id") @db.UnsignedInt
+  id         BigInt      @id @default(autoincrement())
+  companyId  Int?        @map("company_id")
   toEmail    String      @map("to_email") @db.VarChar(255)
   subject    String      @db.VarChar(500)
   template   String?     @db.VarChar(100)
@@ -672,9 +668,9 @@ model EmailEvent {
   providerId String?     @map("provider_id") @db.VarChar(255)
   errorMsg   String?     @map("error_msg") @db.Text
   resource   String?     @db.VarChar(100) // ex: invoice
-  resourceId Int?        @map("resource_id") @db.UnsignedInt
-  sentAt     DateTime?   @map("sent_at") @db.DateTime(0)
-  createdAt  DateTime    @default(now()) @map("created_at") @db.DateTime(0)
+  resourceId Int?        @map("resource_id")
+  sentAt     DateTime?   @map("sent_at")
+  createdAt  DateTime    @default(now()) @map("created_at")
 
   @@index([companyId], map: "idx_email_company")
   @@index([status], map: "idx_email_status")
@@ -687,19 +683,19 @@ model EmailEvent {
 // ============================================================================
 
 model Upload {
-  id         Int        @id @default(autoincrement()) @db.UnsignedInt
-  companyId  Int?       @map("company_id") @db.UnsignedInt
-  uploadedBy Int?       @map("uploaded_by") @db.UnsignedInt
+  id         Int        @id @default(autoincrement())
+  companyId  Int?       @map("company_id")
+  uploadedBy Int?       @map("uploaded_by")
   kind       UploadKind
   resource   String?    @db.VarChar(100)
-  resourceId Int?       @map("resource_id") @db.UnsignedInt
+  resourceId Int?       @map("resource_id")
   fileName   String     @map("file_name") @db.VarChar(500)
   mimeType   String     @map("mime_type") @db.VarChar(100)
-  sizeBytes  BigInt     @map("size_bytes") @db.UnsignedBigInt
+  sizeBytes  BigInt     @map("size_bytes")
   storageKey String     @map("storage_key") @db.VarChar(500) // clé S3/MinIO
   publicUrl  String?    @map("public_url") @db.VarChar(500)
-  version    Int        @default(1) @db.UnsignedInt
-  createdAt  DateTime   @default(now()) @map("created_at") @db.DateTime(0)
+  version    Int        @default(1)
+  createdAt  DateTime   @default(now()) @map("created_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
   user    User?    @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)

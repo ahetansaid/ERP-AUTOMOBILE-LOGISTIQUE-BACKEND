@@ -4,7 +4,7 @@
  * achat arrivée (décaissement achat), transport véhicule, charge.
  */
 
-const { getPool } = require('../config/database');
+const { prisma } = require('../lib/prisma');
 
 const CATEGORIES = {
   ENCAISSEMENT: { PAIEMENT_FACTURE: 'Paiement facture' },
@@ -32,14 +32,6 @@ function mapChargeCategoryToTreasury(category) {
  * @param {Object} opts - company_id, type: 'ENCAISSEMENT'|'DECAISSEMENT', categorie, reference, montant, transaction_date (YYYY-MM-DD), vehicle_id?, description?, receipt_id?, purchase_id?, workshop_quote_id?, charge_id?
  */
 async function createTreasuryTransaction(opts) {
-  const pool = getPool();
-  let tableExists = false;
-  try {
-    const [rows] = await pool.execute("SHOW TABLES LIKE 'transactions_tresorerie'");
-    tableExists = rows && rows.length > 0;
-  } catch (_) {}
-  if (!tableExists) return;
-
   const {
     company_id,
     type,
@@ -63,11 +55,22 @@ async function createTreasuryTransaction(opts) {
   if (!dateStr) return;
 
   try {
-    await pool.execute(
-      `INSERT INTO transactions_tresorerie (company_id, type, categorie, reference, montant, transaction_date, vehicle_id, description, receipt_id, purchase_id, workshop_quote_id, charge_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [company_id || null, type || 'DECAISSEMENT', categorie || 'Autres charges', reference, amount, dateStr, vehicle_id, description, receipt_id, purchase_id, workshop_quote_id, charge_id]
-    );
+    await prisma.treasuryTransaction.create({
+      data: {
+        companyId: company_id != null ? Number(company_id) : null,
+        type: type || 'DECAISSEMENT',
+        categorie: categorie || 'Autres charges',
+        reference,
+        montant: amount,
+        transactionDate: new Date(dateStr),
+        vehicleId: vehicle_id != null ? Number(vehicle_id) : null,
+        description,
+        receiptId: receipt_id != null ? Number(receipt_id) : null,
+        purchaseId: purchase_id != null ? Number(purchase_id) : null,
+        workshopQuoteId: workshop_quote_id != null ? Number(workshop_quote_id) : null,
+        chargeId: charge_id != null ? Number(charge_id) : null,
+      },
+    });
   } catch (err) {
     console.error('treasuryTransactions.createTreasuryTransaction:', err.message);
   }
@@ -128,25 +131,28 @@ async function onPurchaseArrival(companyId, purchaseId, vehicleId, amount, trans
  * Si une transaction Transport existe déjà pour ce véhicule, on la met à jour (une seule ligne par véhicule).
  */
 async function upsertTransportForVehicle(companyId, vehicleId, amount, transactionDate) {
-  const pool = getPool();
-  let tableExists = false;
-  try {
-    const [rows] = await pool.execute("SHOW TABLES LIKE 'transactions_tresorerie'");
-    tableExists = rows && rows.length > 0;
-  } catch (_) {}
-  if (!tableExists) return;
-
   const amt = Number(amount) || 0;
   const dateStr = transactionDate && String(transactionDate).match(/^\d{4}-\d{2}-\d{2}/) ? String(transactionDate).slice(0, 10) : null;
   if (!dateStr) return;
 
   try {
-    const [existing] = await pool.execute(
-      'SELECT id FROM transactions_tresorerie WHERE vehicle_id = ? AND categorie = ? AND type = ? LIMIT 1',
-      [vehicleId, CATEGORIES.DECAISSEMENT.TRANSPORT, 'DECAISSEMENT']
-    );
-    if (existing && existing.length > 0) {
-      await pool.execute('UPDATE transactions_tresorerie SET montant = ?, transaction_date = ?, company_id = ? WHERE id = ?', [amt, dateStr, companyId || null, existing[0].id]);
+    const existing = await prisma.treasuryTransaction.findFirst({
+      where: {
+        vehicleId: Number(vehicleId),
+        categorie: CATEGORIES.DECAISSEMENT.TRANSPORT,
+        type: 'DECAISSEMENT',
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      await prisma.treasuryTransaction.update({
+        where: { id: existing.id },
+        data: {
+          montant: amt,
+          transactionDate: new Date(dateStr),
+          companyId: companyId != null ? Number(companyId) : null,
+        },
+      });
     } else if (amt > 0) {
       await createTreasuryTransaction({
         company_id: companyId,

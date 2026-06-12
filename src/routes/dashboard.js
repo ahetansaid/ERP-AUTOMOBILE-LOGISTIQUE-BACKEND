@@ -1,60 +1,60 @@
 const express = require('express');
-const { getPool } = require('../config/database');
 const { prisma } = require('../lib/prisma');
 
 const router = express.Router();
 
+// Minuit il y a N jours (équivalent DATE_SUB(CURDATE(), INTERVAL N DAY)).
+function midnightDaysAgo(n) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - n);
+  return d;
+}
+
 router.get('/stats', async (req, res) => {
   try {
-    const companyId = req.query.companyId || req.user?.companyId;
-    const pool = getPool();
+    const companyId = req.query.companyId ? Number(req.query.companyId) : req.user?.companyId;
+    const vehicleWhere = companyId ? { companyId } : {};
+    const receiptWhere = companyId ? { companyId } : {};
 
-    const baseWhere = companyId ? ' WHERE company_id = ? AND ' : ' WHERE ';
-    const args = companyId ? [companyId] : [];
+    const countVehicles = (status) =>
+      prisma.vehicle.count({ where: { ...vehicleWhere, status } });
 
-    const [stockDisp] = await pool.execute(
-      `SELECT COUNT(*) AS c FROM vehicles${baseWhere}status = 'DISPONIBLE'`,
-      args
-    );
-    const [stockNonReg] = await pool.execute(
-      `SELECT COUNT(*) AS c FROM vehicles${baseWhere}status = 'EN_VENTE'`,
-      args
-    );
-    const [stockReg] = await pool.execute(
-      `SELECT COUNT(*) AS c FROM vehicles${baseWhere}status = 'VENDU'`,
-      args
-    );
-    const clientWhere = companyId ? ' WHERE company_id = ?' : '';
-    const [clients] = await pool.execute(
-      `SELECT COUNT(DISTINCT id) AS c FROM clients${clientWhere}`,
-      companyId ? [companyId] : []
-    );
-    const [caSemaine] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total FROM receipts WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)${companyId ? ' AND company_id = ?' : ''}`,
-      companyId ? [companyId] : []
-    );
-    const [caMois] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total FROM receipts WHERE payment_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)${companyId ? ' AND company_id = ?' : ''}`,
-      companyId ? [companyId] : []
-    );
-    const [enMaintenance] = await pool.execute(
-      `SELECT COUNT(*) AS c FROM vehicles${baseWhere}status = 'EN_MAINTENANCE'`,
-      args
-    );
-    const [enTransit] = await pool.execute(
-      `SELECT COUNT(*) AS c FROM vehicles${baseWhere}status = 'EN_TRANSIT'`,
-      args
-    );
+    const [
+      stockDisp,
+      stockNonReg,
+      stockReg,
+      nombreClients,
+      caSemaineAgg,
+      caMoisAgg,
+      enMaintenance,
+      enTransit,
+    ] = await Promise.all([
+      countVehicles('DISPONIBLE'),
+      countVehicles('EN_VENTE'),
+      countVehicles('VENDU'),
+      prisma.client.count({ where: companyId ? { companyId } : {} }),
+      prisma.receipt.aggregate({
+        _sum: { amount: true },
+        where: { ...receiptWhere, paymentDate: { gte: midnightDaysAgo(7) } },
+      }),
+      prisma.receipt.aggregate({
+        _sum: { amount: true },
+        where: { ...receiptWhere, paymentDate: { gte: midnightDaysAgo(30) } },
+      }),
+      countVehicles('EN_MAINTENANCE'),
+      countVehicles('EN_TRANSIT'),
+    ]);
 
     return res.status(200).json({
-      stockDisponible: stockDisp[0]?.c ?? 0,
-      stockNonRegulier: stockNonReg[0]?.c ?? 0,
-      stockRegularise: stockReg[0]?.c ?? 0,
-      nombreClients: clients[0]?.c ?? 0,
-      caSemaine: Number(caSemaine[0]?.total ?? 0),
-      caMois: Number(caMois[0]?.total ?? 0),
-      vehiclesEnMaintenance: enMaintenance[0]?.c ?? 0,
-      vehiclesEnTransit: enTransit[0]?.c ?? 0,
+      stockDisponible: stockDisp,
+      stockNonRegulier: stockNonReg,
+      stockRegularise: stockReg,
+      nombreClients,
+      caSemaine: Number(caSemaineAgg._sum.amount ?? 0),
+      caMois: Number(caMoisAgg._sum.amount ?? 0),
+      vehiclesEnMaintenance: enMaintenance,
+      vehiclesEnTransit: enTransit,
       currency: 'XOF',
     });
   } catch (err) {

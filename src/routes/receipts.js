@@ -1,30 +1,51 @@
 const express = require('express');
-const { getPool } = require('../config/database');
+const { prisma } = require('../lib/prisma');
+const { toSnake } = require('../lib/serialize');
 const { onReceiptInvoice, onReceiptWorkshopQuote } = require('../services/treasuryTransactions');
 const { notify } = require('../services/notifications');
 const router = express.Router();
 
+function sortByDateThenId(a, b) {
+  const da = a.paymentDate ? new Date(a.paymentDate).getTime() : 0;
+  const db = b.paymentDate ? new Date(b.paymentDate).getTime() : 0;
+  if (da !== db) return da - db;
+  return (a.id || 0) - (b.id || 0);
+}
+
 router.get('/', async (req, res) => {
   try {
-    const pool = getPool();
-    const sql = 'SELECT r.*, i.invoice_number, c.name AS client_name, wq.prestataire AS devis_prestataire, v.vin AS devis_vin FROM receipts r LEFT JOIN invoices i ON i.id = r.invoice_id LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN workshop_quotes wq ON wq.id = r.workshop_quote_id LEFT JOIN vehicles v ON v.id = wq.vehicle_id ORDER BY r.payment_date DESC, r.id DESC';
-    const [rows] = await pool.execute(sql).catch(function () { return []; });
+    const rows = await prisma.receipt.findMany({
+      orderBy: [{ paymentDate: 'desc' }, { id: 'desc' }],
+      include: {
+        invoice: {
+          select: {
+            invoiceNumber: true,
+            client: { select: { name: true } },
+            vehicle: { select: { priceSale: true } },
+          },
+        },
+        workshopQuote: {
+          select: {
+            amount: true,
+            prestataire: true,
+            vehicle: { select: { vin: true } },
+          },
+        },
+      },
+    });
+
+    // Soldes restants cumulés (par facture via prix de vente du véhicule, par devis via montant du devis)
+    const byInvoice = {};
+    const byQuote = {};
+    for (const r of rows) {
+      if (r.invoiceId != null) (byInvoice[r.invoiceId] ||= []).push(r);
+      if (r.workshopQuoteId != null) (byQuote[r.workshopQuoteId] ||= []).push(r);
+    }
     const remainingByReceiptId = {};
     const priceSaleByReceiptId = {};
-    const invoiceIds = [...new Set((rows || []).filter(function (x) { return x.invoice_id != null; }).map(function (x) { return x.invoice_id; }))];
-    for (const invId of invoiceIds) {
-      const [invRow] = await pool.execute('SELECT vehicle_id FROM invoices WHERE id = ?', [invId]).catch(function () { return [[]]; });
-      const vehicleId = invRow[0] && invRow[0].vehicle_id;
-      if (!vehicleId) continue;
-      const [vRow] = await pool.execute('SELECT price_sale FROM vehicles WHERE id = ?', [vehicleId]).catch(function () { return [[]]; });
-      const priceSale = Number(vRow[0] && vRow[0].price_sale) || 0;
-      const [recList] = await pool.execute('SELECT id, amount, payment_date FROM receipts WHERE invoice_id = ?', [invId]).catch(function () { return [[]]; });
-      const sorted = (recList || []).slice().sort(function (a, b) {
-        const da = a.payment_date ? new Date(a.payment_date).getTime() : 0;
-        const db = b.payment_date ? new Date(b.payment_date).getTime() : 0;
-        if (da !== db) return da - db;
-        return (a.id || 0) - (b.id || 0);
-      });
+    for (const recs of Object.values(byInvoice)) {
+      const priceSale = Number(recs[0].invoice?.vehicle?.priceSale) || 0;
+      const sorted = recs.slice().sort(sortByDateThenId);
       let cumulative = 0;
       for (const rec of sorted) {
         cumulative += Number(rec.amount) || 0;
@@ -32,27 +53,30 @@ router.get('/', async (req, res) => {
         priceSaleByReceiptId[rec.id] = priceSale;
       }
     }
-    const devisIds = [...new Set((rows || []).filter(function (x) { return x.workshop_quote_id != null; }).map(function (x) { return x.workshop_quote_id; }))];
-    for (const wqId of devisIds) {
-      const [wqRow] = await pool.execute('SELECT amount FROM workshop_quotes WHERE id = ?', [wqId]).catch(function () { return [[]]; });
-      const devisAmount = Number(wqRow[0] && wqRow[0].amount) || 0;
-      const [recList] = await pool.execute('SELECT id, amount FROM receipts WHERE workshop_quote_id = ? ORDER BY payment_date ASC, id ASC', [wqId]).catch(function () { return [[]]; });
+    for (const recs of Object.values(byQuote)) {
+      const devisAmount = Number(recs[0].workshopQuote?.amount) || 0;
+      const sorted = recs.slice().sort(sortByDateThenId);
       let cumulative = 0;
-      for (const rec of recList || []) {
+      for (const rec of sorted) {
         cumulative += Number(rec.amount) || 0;
         remainingByReceiptId[rec.id] = Math.max(0, devisAmount - cumulative);
       }
     }
-    const receipts = rows.map(function (r) {
-      const out = { ...r };
-      out.source_type = r.workshop_quote_id ? 'DEVIS' : 'FACTURE';
-      if (r.workshop_quote_id) {
-        out.devis_id = r.workshop_quote_id;
-        out.devis_prestataire = r.devis_prestataire || null;
+
+    const receipts = rows.map((r) => {
+      const { invoice, workshopQuote, ...recRest } = r;
+      const out = toSnake(recRest);
+      out.invoice_number = invoice?.invoiceNumber ?? null;
+      out.client_name = invoice?.client?.name ?? null;
+      out.devis_prestataire = workshopQuote?.prestataire ?? null;
+      out.devis_vin = workshopQuote?.vehicle?.vin ?? null;
+
+      out.source_type = r.workshopQuoteId ? 'DEVIS' : 'FACTURE';
+      if (r.workshopQuoteId) {
+        out.devis_id = r.workshopQuoteId;
         out.devisPrestataire = out.devis_prestataire;
         out.prestataire = out.devis_prestataire;
         out.workshop_prestataire = out.devis_prestataire;
-        out.devis_vin = r.devis_vin || null;
         const remDevis = remainingByReceiptId[r.id];
         if (remDevis !== undefined) {
           out.remaining_amount = remDevis;
@@ -60,8 +84,6 @@ router.get('/', async (req, res) => {
           out.solde_restant = remDevis;
         }
       } else {
-        out.invoice_id = r.invoice_id;
-        out.client_name = r.client_name || null;
         out.clientName = out.client_name;
         out.client = out.client_name;
         const rem = remainingByReceiptId[r.id];
@@ -115,6 +137,11 @@ function safeReceived(body) {
   } catch (e) {
     return {};
   }
+}
+
+async function sumReceipts(where) {
+  const agg = await prisma.receipt.aggregate({ _sum: { amount: true }, where });
+  return Number(agg._sum.amount ?? 0);
 }
 
 router.post('/', async (req, res) => {
@@ -180,31 +207,17 @@ router.post('/', async (req, res) => {
     if (hasDevis) devisId = Number(devisId) || devisId;
     if (hasInvoice) invoiceId = Number(invoiceId) || invoiceId;
 
-    const pool = getPool();
-    let hasWorkshopQuoteCol = false;
-    try {
-      await pool.execute('SELECT workshop_quote_id FROM receipts LIMIT 0');
-      hasWorkshopQuoteCol = true;
-    } catch (e) {
-      if (e.code === 'ER_BAD_FIELD_ERROR' || (e.message && e.message.indexOf('workshop_quote_id') !== -1)) {
-        hasWorkshopQuoteCol = false;
-      } else {
-        throw e;
-      }
-    }
+    const paymentDateObj = new Date(paymentDate);
 
+    let created;
     if (hasDevis) {
-      if (!hasWorkshopQuoteCol) {
-        return res.status(400).json({
-          message: "Reçu devis non supporté : la table receipts n'a pas la colonne workshop_quote_id. Exécuter la migration scripts/migrations/add_receipts_workshop_quote_id.sql puis redémarrer.",
-          statusCode: 400,
-        });
-      }
-      const [q] = await pool.execute('SELECT id, amount FROM workshop_quotes WHERE id = ?', [devisId]);
-      if (!q.length) return res.status(404).json({ message: 'Devis introuvable', statusCode: 404 });
-      const devisAmount = Number(q[0].amount) || 0;
-      const [sumRow] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS total FROM receipts WHERE workshop_quote_id = ?', [devisId]);
-      const alreadyPaid = Number(sumRow[0] && sumRow[0].total) || 0;
+      const q = await prisma.workshopQuote.findUnique({
+        where: { id: Number(devisId) },
+        select: { id: true, amount: true, companyId: true, vehicleId: true, closedAt: true },
+      });
+      if (!q) return res.status(404).json({ message: 'Devis introuvable', statusCode: 404 });
+      const devisAmount = Number(q.amount) || 0;
+      const alreadyPaid = await sumReceipts({ workshopQuoteId: Number(devisId) });
       const remainingBefore = Math.max(0, devisAmount - alreadyPaid);
       if (remainingBefore <= 0) {
         return res.status(409).json({
@@ -220,29 +233,32 @@ router.post('/', async (req, res) => {
           remaining_amount: remainingBefore,
         });
       }
-      const [insRec] = await pool.execute('INSERT INTO receipts (workshop_quote_id, amount, payment_method, payment_date, reference) VALUES (?, ?, ?, ?, ?)', [devisId, amount, paymentMethod, paymentDate, reference]);
-      const receiptId = insRec && insRec.insertId;
-      const [newSumRow] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS total FROM receipts WHERE workshop_quote_id = ?', [devisId]);
-      const totalPaidAfter = Number(newSumRow[0] && newSumRow[0].total) || 0;
+      created = await prisma.receipt.create({
+        data: {
+          workshopQuoteId: Number(devisId),
+          amount,
+          paymentMethod,
+          paymentDate: paymentDateObj,
+          reference,
+        },
+      });
+      const totalPaidAfter = await sumReceipts({ workshopQuoteId: Number(devisId) });
       if (totalPaidAfter >= devisAmount) {
-        try {
-          await pool.execute("UPDATE workshop_quotes SET status = ?, closed_at = COALESCE(closed_at, NOW()) WHERE id = ?", ['TERMINE', devisId]);
-        } catch (e) {
-          await pool.execute('UPDATE workshop_quotes SET status = ? WHERE id = ?', ['TERMINE', devisId]);
-        }
+        await prisma.workshopQuote.update({
+          where: { id: Number(devisId) },
+          data: { status: 'TERMINE', closedAt: q.closedAt ?? new Date() },
+        });
       }
-      const [wqRow] = await pool.execute('SELECT company_id, vehicle_id FROM workshop_quotes WHERE id = ?', [devisId]).catch(() => [[]]);
-      const companyId = wqRow[0] && wqRow[0].company_id;
-      const vehicleId = wqRow[0] && wqRow[0].vehicle_id;
-      if (receiptId) await onReceiptWorkshopQuote(companyId, receiptId, amount, paymentDate, reference, vehicleId, devisId);
+      if (created.id) await onReceiptWorkshopQuote(q.companyId, created.id, amount, paymentDate, reference, q.vehicleId, Number(devisId));
     } else {
-      const [inv] = await pool.execute('SELECT id, vehicle_id FROM invoices WHERE id = ?', [invoiceId]);
-      if (!inv.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
-      const vehicleId = inv[0].vehicle_id;
-      const [vRow] = await pool.execute('SELECT price_sale FROM vehicles WHERE id = ?', [vehicleId]).catch(function () { return [[]]; });
-      const priceSale = Number(vRow[0] && vRow[0].price_sale) || 0;
-      const [sumRow] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS total FROM receipts WHERE invoice_id = ?', [invoiceId]);
-      const alreadyPaid = Number(sumRow[0] && sumRow[0].total) || 0;
+      const inv = await prisma.invoice.findUnique({
+        where: { id: Number(invoiceId) },
+        select: { id: true, vehicleId: true, companyId: true, invoiceNumber: true, vehicle: { select: { priceSale: true } } },
+      });
+      if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+      const vehicleId = inv.vehicleId;
+      const priceSale = Number(inv.vehicle?.priceSale) || 0;
+      const alreadyPaid = await sumReceipts({ invoiceId: Number(invoiceId) });
       const remainingBefore = Math.max(0, priceSale - alreadyPaid);
       if (remainingBefore <= 0) {
         return res.status(409).json({
@@ -258,14 +274,18 @@ router.post('/', async (req, res) => {
           remaining_amount: remainingBefore,
         });
       }
-      const [insRec] = await pool.execute('INSERT INTO receipts (invoice_id, amount, payment_method, payment_date, reference) VALUES (?, ?, ?, ?, ?)', [invoiceId, amount, paymentMethod, paymentDate, reference]);
-      const receiptId = insRec && insRec.insertId;
-      const [invRow] = await pool.execute('SELECT company_id FROM invoices WHERE id = ?', [invoiceId]).catch(() => [[]]);
-      const companyId = invRow[0] && invRow[0].company_id;
-      if (receiptId) await onReceiptInvoice(companyId, receiptId, amount, paymentDate, reference, vehicleId);
-      // Notification in-app : paiement reçu sur facture
-      const [invInfo] = await pool.execute('SELECT invoice_number FROM invoices WHERE id = ?', [invoiceId]).catch(() => [[]]);
-      const invNumber = (invInfo[0] && invInfo[0].invoice_number) || `#${invoiceId}`;
+      created = await prisma.receipt.create({
+        data: {
+          invoiceId: Number(invoiceId),
+          amount,
+          paymentMethod,
+          paymentDate: paymentDateObj,
+          reference,
+        },
+      });
+      const companyId = inv.companyId;
+      if (created.id) await onReceiptInvoice(companyId, created.id, amount, paymentDate, reference, vehicleId);
+      const invNumber = inv.invoiceNumber || `#${invoiceId}`;
       notify({
         companyId,
         type: 'SUCCESS',
@@ -275,11 +295,8 @@ router.post('/', async (req, res) => {
         audience: 'admins',
       });
     }
-    const createdId = hasDevis
-      ? (await pool.execute('SELECT id FROM receipts WHERE workshop_quote_id = ? ORDER BY id DESC LIMIT 1', [devisId]))[0][0].id
-      : (await pool.execute('SELECT id FROM receipts WHERE invoice_id = ? ORDER BY id DESC LIMIT 1', [invoiceId]))[0][0].id;
-    const [insert] = await pool.execute('SELECT * FROM receipts WHERE id = ?', [createdId]);
-    return res.status(201).json(insert[0]);
+
+    return res.status(201).json(toSnake(created));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
@@ -288,30 +305,29 @@ router.post('/', async (req, res) => {
 
 router.patch('/:id', async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = Number(req.params.id);
     const body = req.body || {};
     const amount = body.amount != null ? Number(body.amount) : undefined;
     const paymentMethod = body.paymentMethod ?? body.payment_method;
     const paymentDateRaw = body.paymentDate ?? body.payment_date;
     const paymentDate = paymentDateRaw != null && paymentDateRaw !== '' ? toDateOnly(paymentDateRaw) : undefined;
     const reference = body.reference !== undefined ? String(body.reference).trim() : undefined;
-    const pool = getPool();
-    const [rows] = await pool.execute('SELECT id FROM receipts WHERE id = ?', [id]);
-    if (!rows.length) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
-    const updates = [];
-    const values = [];
-    if (amount != null && !isNaN(amount)) { updates.push('amount = ?'); values.push(amount); }
-    if (paymentMethod !== undefined) { updates.push('payment_method = ?'); values.push(paymentMethod); }
-    if (paymentDate !== undefined) { updates.push('payment_date = ?'); values.push(paymentDate); }
-    if (reference !== undefined) { updates.push('reference = ?'); values.push(reference || null); }
-    if (updates.length === 0) {
-      const [r] = await pool.execute('SELECT * FROM receipts WHERE id = ?', [id]);
-      return res.status(200).json(r[0]);
+
+    const existing = await prisma.receipt.findUnique({ where: { id }, select: { id: true } });
+    if (!existing) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
+
+    const data = {};
+    if (amount != null && !isNaN(amount)) data.amount = amount;
+    if (paymentMethod !== undefined) data.paymentMethod = paymentMethod;
+    if (paymentDate !== undefined) data.paymentDate = new Date(paymentDate);
+    if (reference !== undefined) data.reference = reference || null;
+
+    if (Object.keys(data).length === 0) {
+      const current = await prisma.receipt.findUnique({ where: { id } });
+      return res.status(200).json(toSnake(current));
     }
-    values.push(id);
-    await pool.execute('UPDATE receipts SET ' + updates.join(', ') + ' WHERE id = ?', values);
-    const [updated] = await pool.execute('SELECT * FROM receipts WHERE id = ?', [id]);
-    return res.status(200).json(updated[0]);
+    const updated = await prisma.receipt.update({ where: { id }, data });
+    return res.status(200).json(toSnake(updated));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
@@ -320,18 +336,10 @@ router.patch('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const id = req.params.id;
-    const reason = (req.body && req.body.reason) != null ? String(req.body.reason).trim() : null;
-    const pool = getPool();
-    const [rows] = await pool.execute('SELECT id FROM receipts WHERE id = ?', [id]);
-    if (!rows.length) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
-    try {
-      const [cols] = await pool.execute("SHOW COLUMNS FROM receipts LIKE 'deletion_reason'");
-      if (cols.length && reason) {
-        await pool.execute('UPDATE receipts SET deletion_reason = ?, deleted_at = NOW() WHERE id = ?', [reason, id]);
-      }
-    } catch (_) {}
-    await pool.execute('DELETE FROM receipts WHERE id = ?', [id]);
+    const id = Number(req.params.id);
+    const existing = await prisma.receipt.findUnique({ where: { id }, select: { id: true } });
+    if (!existing) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
+    await prisma.receipt.delete({ where: { id } });
     return res.status(204).send();
   } catch (err) {
     console.error(err);

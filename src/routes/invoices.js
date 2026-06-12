@@ -1,25 +1,29 @@
 const express = require('express');
-const { getPool } = require('../config/database');
 const { prisma } = require('../lib/prisma');
+const { toSnake } = require('../lib/serialize');
 const { renderDocumentPdf } = require('../pdf/render');
 const router = express.Router();
 
 router.get('/', async (req, res) => {
   try {
-    const pool = getPool();
-    const [rows] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin, v.price_sale FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id ORDER BY i.id DESC');
-    const out = [];
-    for (const r of rows) {
-      let paid = 0;
-      try {
-        const [rec] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [r.id]);
-        paid = Number(rec[0]?.paid ?? 0);
-      } catch (_) {}
-      const total = Number(r.total_amount) || 0;
-      const priceSale = Number(r.price_sale) || 0;
+    const rows = await prisma.invoice.findMany({
+      orderBy: { id: 'desc' },
+      include: {
+        client: { select: { name: true } },
+        vehicle: { select: { vin: true, priceSale: true } },
+        receipts: { select: { amount: true } },
+      },
+    });
+    const out = rows.map((r) => {
+      const paid = (r.receipts || []).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+      const total = Number(r.totalAmount) || 0;
+      const priceSale = Number(r.vehicle?.priceSale) || 0;
       const remaining = Math.max(0, priceSale - paid);
-      out.push({
-        ...r,
+      const { client, vehicle, receipts, ...rest } = r;
+      return {
+        ...toSnake(rest),
+        client_name: client?.name ?? null,
+        vin: vehicle?.vin ?? null,
         amount: total,
         total_amount: total,
         paid_amount: paid,
@@ -27,8 +31,8 @@ router.get('/', async (req, res) => {
         price_sale: priceSale,
         priceSale: priceSale,
         prix_vente: priceSale,
-      });
-    }
+      };
+    });
     return res.status(200).json({ invoices: out, pagination: {} });
   } catch (e) {
     console.error(e);
@@ -38,36 +42,47 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const id = req.params.id;
-    const pool = getPool();
-    const [rows] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin, v.price_sale FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [id]);
-    if (!rows.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
-    const r = rows[0];
-    const [sumRow] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [id]);
-    const paid = Number(sumRow[0]?.paid ?? 0);
-    const priceSale = Number(r.price_sale) || 0;
+    const id = Number(req.params.id);
+    const r = await prisma.invoice.findUnique({
+      where: { id },
+      include: {
+        client: { select: { name: true } },
+        vehicle: { select: { vin: true, priceSale: true } },
+        receipts: {
+          orderBy: [{ paymentDate: 'asc' }, { id: 'asc' }],
+          select: { id: true, amount: true, paymentMethod: true, paymentDate: true, reference: true },
+        },
+      },
+    });
+    if (!r) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+
+    const paid = (r.receipts || []).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const priceSale = Number(r.vehicle?.priceSale) || 0;
     const remaining = Math.max(0, priceSale - paid);
-    const [recRows] = await pool.execute('SELECT id, amount, payment_method, payment_date, reference FROM receipts WHERE invoice_id = ? ORDER BY payment_date ASC, id ASC', [id]);
-    const priceSaleUsed = priceSale;
+
     let cumulative = 0;
-    const receipts = (recRows || []).map(function (rec) {
+    const receipts = (r.receipts || []).map((rec) => {
       cumulative += Number(rec.amount) || 0;
-      const soldeApres = Math.max(0, priceSaleUsed - cumulative);
+      const soldeApres = Math.max(0, priceSale - cumulative);
       return {
         id: rec.id,
         amount: Number(rec.amount),
-        payment_method: rec.payment_method,
-        payment_date: rec.payment_date,
+        payment_method: rec.paymentMethod,
+        payment_date: rec.paymentDate,
         reference: rec.reference,
         remaining_amount: soldeApres,
         remainingAmount: soldeApres,
         solde_restant_apres: soldeApres,
       };
     });
+
+    const { client, vehicle, receipts: _rec, ...rest } = r;
     const invoice = {
-      ...r,
-      amount: Number(r.total_amount) || 0,
-      total_amount: Number(r.total_amount) || 0,
+      ...toSnake(rest),
+      client_name: client?.name ?? null,
+      vin: vehicle?.vin ?? null,
+      amount: Number(r.totalAmount) || 0,
+      total_amount: Number(r.totalAmount) || 0,
       paid_amount: paid,
       remaining_amount: remaining,
       price_sale: priceSale,
@@ -89,10 +104,10 @@ router.post('/', async (req, res) => {
     const amount = body.amount ?? body.total_amount;
     const dueDate = body.dueDate ?? body.due_date;
     if (!vehicleId || !clientId || amount == null) return res.status(400).json({ message: 'vehicleId, clientId et amount (ou total_amount) requis', statusCode: 400 });
-    const pool = getPool();
-    const [vRow] = await pool.execute('SELECT price_sale FROM vehicles WHERE id = ?', [vehicleId]);
-    if (!vRow || !vRow.length) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
-    const priceSale = Number(vRow[0].price_sale);
+
+    const vehicle = await prisma.vehicle.findUnique({ where: { id: Number(vehicleId) }, select: { priceSale: true } });
+    if (!vehicle) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    const priceSale = Number(vehicle.priceSale);
     if (priceSale == null || isNaN(priceSale) || priceSale <= 0) {
       return res.status(400).json({
         message: 'Le véhicule doit avoir un prix de vente renseigné pour créer la facture. Montant facture = prix de vente (1 facture = 1 véhicule).',
@@ -100,25 +115,53 @@ router.post('/', async (req, res) => {
       });
     }
     const amountToUse = priceSale;
-    const [existingInvs] = await pool.execute('SELECT id, invoice_number FROM invoices WHERE vehicle_id = ?', [vehicleId]);
-    if (existingInvs && existingInvs.length > 0) {
-      const num = existingInvs[0].invoice_number || existingInvs[0].id;
+
+    const existing = await prisma.invoice.findUnique({
+      where: { vehicleId: Number(vehicleId) },
+      select: { id: true, invoiceNumber: true },
+    });
+    if (existing) {
       return res.status(409).json({
         message: 'Un véhicule ne peut avoir qu\'une seule facture. Ce véhicule a déjà une facture. Les paiements se font via des reçus liés à cette facture (page Reçus).',
         statusCode: 409,
-        existingInvoice: num,
+        existingInvoice: existing.invoiceNumber || existing.id,
       });
     }
+
+    // Numéro de facture : FAV-{année}-{séquence 4 chiffres} (séquence par année).
     const y = new Date().getFullYear();
-    const [seq] = await pool.execute('SELECT COALESCE(MAX(CAST(SUBSTRING(invoice_number, -4) AS UNSIGNED)), 0) + 1 AS n FROM invoices WHERE YEAR(created_at) = ?', [y]);
-    const n = String(seq[0]?.n ?? 1).padStart(4, '0');
+    const yearInvoices = await prisma.invoice.findMany({
+      where: { createdAt: { gte: new Date(y, 0, 1), lt: new Date(y + 1, 0, 1) } },
+      select: { invoiceNumber: true },
+    });
+    let maxN = 0;
+    for (const inv of yearInvoices) {
+      const num = parseInt(String(inv.invoiceNumber || '').slice(-4), 10);
+      if (!isNaN(num) && num > maxN) maxN = num;
+    }
+    const n = String(maxN + 1).padStart(4, '0');
     const invoice_number = 'FAV-' + y + '-' + n;
-    const [ins] = await pool.execute(
-      'INSERT INTO invoices (vehicle_id, client_id, total_amount, due_date, invoice_number, status) VALUES (?, ?, ?, ?, ?, ?)',
-      [vehicleId, clientId, amountToUse, dueDate || null, invoice_number, 'EMISE']
-    );
-    const [created] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [ins.insertId]);
-    return res.status(201).json(created[0]);
+
+    await prisma.invoice.create({
+      data: {
+        vehicleId: Number(vehicleId),
+        clientId: Number(clientId),
+        totalAmount: amountToUse,
+        dueDate: dueDate ? new Date(dueDate) : null,
+        invoiceNumber: invoice_number,
+        status: 'EMISE',
+      },
+    });
+    const created = await prisma.invoice.findUnique({
+      where: { vehicleId: Number(vehicleId) },
+      include: { client: { select: { name: true } }, vehicle: { select: { vin: true } } },
+    });
+    const { client, vehicle: veh, ...rest } = created;
+    return res.status(201).json({
+      ...toSnake(rest),
+      client_name: client?.name ?? null,
+      vin: veh?.vin ?? null,
+    });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
@@ -127,36 +170,47 @@ router.post('/', async (req, res) => {
 
 router.patch('/:id', async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = Number(req.params.id);
     const body = req.body || {};
-    const pool = getPool();
-    const [rows] = await pool.execute('SELECT i.id, i.total_amount FROM invoices i WHERE i.id = ?', [id]);
-    if (!rows.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
-    const [rec] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [id]);
-    const paid = Number(rec[0]?.paid ?? 0);
+    const inv = await prisma.invoice.findUnique({ where: { id }, select: { id: true, totalAmount: true } });
+    if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+
+    const paidAgg = await prisma.receipt.aggregate({ _sum: { amount: true }, where: { invoiceId: id } });
+    const paid = Number(paidAgg._sum.amount ?? 0);
     if (paid > 0) {
       return res.status(409).json({ message: 'Un reçu a déjà été émis pour cette facture. Modification impossible.', statusCode: 409 });
     }
-    const updates = [];
-    const values = [];
-    if (body.vehicleId != null) { updates.push('vehicle_id = ?'); values.push(body.vehicleId); }
-    if (body.clientId != null) { updates.push('client_id = ?'); values.push(body.clientId); }
+
+    const data = {};
+    if (body.vehicleId != null) data.vehicleId = Number(body.vehicleId);
+    if (body.clientId != null) data.clientId = Number(body.clientId);
     if (body.amount != null || body.total_amount != null) {
-      const amt = body.amount != null ? body.amount : body.total_amount;
-      updates.push('total_amount = ?');
-      values.push(Number(amt));
+      data.totalAmount = Number(body.amount != null ? body.amount : body.total_amount);
     }
-    if (body.dueDate !== undefined) { updates.push('due_date = ?'); values.push(body.dueDate || null); }
-    if (updates.length === 0) {
-      const [inv] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [id]);
-      return res.status(200).json(inv[0]);
+    if (body.dueDate !== undefined) data.dueDate = body.dueDate ? new Date(body.dueDate) : null;
+
+    if (Object.keys(data).length === 0) {
+      const current = await prisma.invoice.findUnique({
+        where: { id },
+        include: { client: { select: { name: true } }, vehicle: { select: { vin: true } } },
+      });
+      const { client, vehicle, ...rest } = current;
+      return res.status(200).json({ ...toSnake(rest), client_name: client?.name ?? null, vin: vehicle?.vin ?? null });
     }
-    values.push(id);
-    await pool.execute('UPDATE invoices SET ' + updates.join(', ') + ' WHERE id = ?', values);
-    const [updated] = await pool.execute('SELECT i.*, c.name AS client_name, v.vin FROM invoices i LEFT JOIN clients c ON c.id = i.client_id LEFT JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?', [id]);
-    const r = updated[0];
-    const paidAmount = paid;
-    return res.status(200).json({ ...r, paid_amount: paidAmount, remaining_amount: Math.max(0, Number(r.total_amount) - paidAmount) });
+
+    await prisma.invoice.update({ where: { id }, data });
+    const updated = await prisma.invoice.findUnique({
+      where: { id },
+      include: { client: { select: { name: true } }, vehicle: { select: { vin: true } } },
+    });
+    const { client, vehicle, ...rest } = updated;
+    return res.status(200).json({
+      ...toSnake(rest),
+      client_name: client?.name ?? null,
+      vin: vehicle?.vin ?? null,
+      paid_amount: paid,
+      remaining_amount: Math.max(0, Number(updated.totalAmount) - paid),
+    });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
@@ -165,18 +219,16 @@ router.patch('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const id = req.params.id;
-    const reason = (req.body && req.body.reason) != null ? String(req.body.reason).trim() : null;
-    const pool = getPool();
-    const [rows] = await pool.execute('SELECT id FROM invoices WHERE id = ?', [id]);
-    if (!rows.length) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
-    const [rec] = await pool.execute('SELECT COALESCE(SUM(amount), 0) AS paid FROM receipts WHERE invoice_id = ?', [id]);
-    const paid = Number(rec[0]?.paid ?? 0);
+    const id = Number(req.params.id);
+    const inv = await prisma.invoice.findUnique({ where: { id }, select: { id: true } });
+    if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+    const paidAgg = await prisma.receipt.aggregate({ _sum: { amount: true }, where: { invoiceId: id } });
+    const paid = Number(paidAgg._sum.amount ?? 0);
     if (paid > 0) {
       return res.status(409).json({ message: 'Un reçu a déjà été émis pour cette facture. Suppression impossible.', statusCode: 409 });
     }
-    await pool.execute('DELETE FROM receipts WHERE invoice_id = ?', [id]);
-    await pool.execute('DELETE FROM invoices WHERE id = ?', [id]);
+    await prisma.receipt.deleteMany({ where: { invoiceId: id } });
+    await prisma.invoice.delete({ where: { id } });
     return res.status(204).send();
   } catch (e) {
     console.error(e);

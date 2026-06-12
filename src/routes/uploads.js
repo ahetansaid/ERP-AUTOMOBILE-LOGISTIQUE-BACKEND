@@ -99,6 +99,7 @@ router.post(
         kind,
         originalName: req.file.originalname,
         buffer: req.file.buffer,
+        contentType: req.file.mimetype,
       });
 
       const row = await prisma.upload.create({
@@ -195,7 +196,7 @@ router.get('/:id/raw', authorize('uploads', 'read'), async (req, res) => {
         .json({ message: 'Fichier introuvable', statusCode: 404 });
     }
 
-    const stream = streamObject(row.storageKey);
+    const stream = await streamObject(row.storageKey);
     const type =
       row.mimeType || mime.lookup(row.fileName) || 'application/octet-stream';
     res.setHeader('Content-Type', type);

@@ -1,19 +1,21 @@
 const express = require('express');
-const { getPool } = require('../config/database');
+const { prisma } = require('../lib/prisma');
 const router = express.Router();
 
 router.get('/rates', async (req, res) => {
   try {
     const companyId = req.query.companyId || req.user?.companyId;
-    const pool = getPool();
     try {
-      const [rows] = await pool.execute(
-        'SELECT currency, rate_fcfa FROM exchange_rates WHERE is_active = 1' + (companyId ? ' AND company_id = ?' : ''),
-        companyId ? [companyId] : []
-      );
+      const rows = await prisma.exchangeRate.findMany({
+        where: {
+          isActive: true,
+          ...(companyId ? { companyId: Number(companyId) } : {}),
+        },
+        select: { currency: true, rateFcfa: true },
+      });
       const rates = {};
-      rows.forEach(function (r) {
-        rates[r.currency] = Number(r.rate_fcfa);
+      rows.forEach((r) => {
+        rates[r.currency] = Number(r.rateFcfa);
       });
       return res.status(200).json({ rates });
     } catch (e) {
@@ -29,18 +31,33 @@ router.put('/rates', async (req, res) => {
   try {
     const { USD, EUR } = req.body || {};
     const companyId = req.body.companyId || req.user?.companyId;
-    const pool = getPool();
+    const companyWhere = companyId ? { companyId: Number(companyId) } : {};
     try {
       if (USD != null) {
-        await pool.execute('UPDATE exchange_rates SET rate_fcfa = ?, is_active = 1 WHERE currency = ?' + (companyId ? ' AND company_id = ?' : ''), companyId ? [USD, 'USD', companyId] : [USD, 'USD']);
+        await prisma.exchangeRate.updateMany({
+          where: { currency: 'USD', ...companyWhere },
+          data: { rateFcfa: USD, isActive: true },
+        });
       }
       if (EUR != null) {
-        await pool.execute('UPDATE exchange_rates SET rate_fcfa = ?, is_active = 1 WHERE currency = ?' + (companyId ? ' AND company_id = ?' : ''), companyId ? [EUR, 'EUR', companyId] : [EUR, 'EUR']);
+        await prisma.exchangeRate.updateMany({
+          where: { currency: 'EUR', ...companyWhere },
+          data: { rateFcfa: EUR, isActive: true },
+        });
       }
     } catch (e) {}
-    const [rows] = await pool.execute('SELECT currency, rate_fcfa FROM exchange_rates WHERE is_active = 1').catch(function () { return [[]]; });
+
+    let rows = [];
+    try {
+      rows = await prisma.exchangeRate.findMany({
+        where: { isActive: true },
+        select: { currency: true, rateFcfa: true },
+      });
+    } catch (e) {
+      rows = [];
+    }
     const rates = {};
-    (rows || []).forEach(function (r) { rates[r.currency] = Number(r.rate_fcfa); });
+    rows.forEach((r) => { rates[r.currency] = Number(r.rateFcfa); });
     if (Object.keys(rates).length === 0) return res.status(200).json({ rates: { USD: USD ?? 600, EUR: EUR ?? 655 } });
     return res.status(200).json({ rates });
   } catch (e) {

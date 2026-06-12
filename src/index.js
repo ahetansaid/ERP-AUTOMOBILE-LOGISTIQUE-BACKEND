@@ -85,6 +85,14 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
 });
 
-app.listen(PORT, () => {
-  console.log('Serveur ParcAuto Manager sur le port', PORT);
-});
+// En environnement serverless (Vercel), l'app est importée par api/index.js
+// et la plateforme gère le cycle de vie HTTP. On ne démarre un serveur
+// persistant (app.listen) que hors serverless : dev local ou hébergement
+// classique type Railway/Render.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log('Serveur ParcAuto Manager sur le port', PORT);
+  });
+}
+
+module.exports = app;

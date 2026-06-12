@@ -2,7 +2,6 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { getPool } = require('../config/database');
 const { prisma } = require('../lib/prisma');
 const { sendMail } = require('../lib/mailer');
 const {
@@ -242,16 +241,14 @@ router.post('/refresh', async (req, res) => {
     if (decoded.type !== 'refresh') {
       return res.status(401).json({ message: 'Token invalide', statusCode: 401 });
     }
-    const pool = getPool();
-    const [rows] = await pool.execute(
-      'SELECT id, email, role, company_id FROM users WHERE id = ? AND is_active = 1 LIMIT 1',
-      [decoded.id]
-    );
-    if (!rows.length) {
+    const user = await prisma.user.findFirst({
+      where: { id: decoded.id, isActive: true },
+      select: { id: true, email: true, role: true, companyId: true },
+    });
+    if (!user) {
       return res.status(401).json({ message: 'Utilisateur introuvable', statusCode: 401 });
     }
-    const user = rows[0];
-    const payload = { id: user.id, email: user.email, role: user.role, companyId: user.company_id };
+    const payload = { id: user.id, email: user.email, role: user.role, companyId: user.companyId };
     const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: EXPIRES_IN });
     const expiresInSeconds = 30 * 60;
     return res.status(200).json({ accessToken, expiresIn: expiresInSeconds });
