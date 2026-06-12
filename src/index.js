@@ -26,8 +26,24 @@ const { attachAudit } = require('./middleware/audit');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// CORS_ORIGIN peut contenir plusieurs origines séparées par des virgules,
+// ou "*" pour tout autoriser. On reflète l'origine de la requête quand elle
+// est autorisée (compatible avec credentials: true, contrairement à un "*"
+// brut que les navigateurs rejettent).
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const corsOptions = {
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: (origin, cb) => {
+    // Requêtes sans Origin (curl, server-to-server, health checks) : autorisées.
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+    return cb(new Error(`Origine non autorisée par CORS : ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
