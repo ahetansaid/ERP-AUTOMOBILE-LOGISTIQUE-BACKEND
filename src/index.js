@@ -21,9 +21,16 @@ const usersRoutes = require('./routes/users');
 const settingsRoutes = require('./routes/settings');
 const notificationsRoutes = require('./routes/notifications');
 const uploadsRoutes = require('./routes/uploads');
+const ledgerRoutes = require('./routes/ledger');
+const partnersRoutes = require('./routes/partners');
+const searchRoutes = require('./routes/search');
+const rapportsRoutes = require('./routes/reportsPeriodiques');
+const alertesRoutes = require('./routes/alertes');
+const fraisRoutes = require('./routes/purchaseCosts');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
+const { withContext } = require('./lib/context');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -69,9 +76,13 @@ const authLimiter = rateLimit({
   message: { message: 'Trop de tentatives. Réessayez dans quelques minutes.', statusCode: 429 },
 });
 
-// Toutes les routes authentifiées passent désormais par tenantScope
-// (isolation multi-société) en plus de authMiddleware.
-const guarded = [authMiddleware, tenantScope];
+// Chaîne des routes authentifiées :
+//   authMiddleware → qui es-tu
+//   tenantScope    → sur quelle société tu opères
+//   withContext    → ouvre le contexte que l'extension Prisma consulte pour
+//                    appliquer le filtre société et écrire le journal d'audit
+// L'ordre est significatif : withContext lit ce que les deux précédents posent.
+const guarded = [authMiddleware, tenantScope, withContext];
 
 function mount(prefix) {
   app.use(`${prefix}/auth`, authLimiter, authRoutes);
@@ -92,6 +103,12 @@ function mount(prefix) {
   app.use(`${prefix}/settings`, ...guarded, settingsRoutes);
   app.use(`${prefix}/notifications`, ...guarded, notificationsRoutes);
   app.use(`${prefix}/uploads`, ...guarded, uploadsRoutes);
+  app.use(`${prefix}/ledger`, ...guarded, ledgerRoutes);
+  app.use(`${prefix}/partners`, ...guarded, partnersRoutes);
+  app.use(`${prefix}/search`, ...guarded, searchRoutes);
+  app.use(`${prefix}/rapports`, ...guarded, rapportsRoutes);
+  app.use(`${prefix}/alertes`, ...guarded, alertesRoutes);
+  app.use(`${prefix}/frais-conteneur`, ...guarded, fraisRoutes);
 }
 
 mount('');

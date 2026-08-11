@@ -2,7 +2,11 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { prisma } = require('../lib/prisma');
+// Client BRUT volontairement : l'authentification est par nature antérieure au
+// périmètre société. On cherche l'utilisateur par e-mail ou par token avant de
+// savoir à quelle société il appartient — le filtre société ne peut donc pas
+// s'appliquer ici. Toute autre route doit utiliser le client `prisma` étendu.
+const { prismaRaw: prisma } = require('../lib/prisma');
 const { sendMail } = require('../lib/mailer');
 const {
   generateSecret,

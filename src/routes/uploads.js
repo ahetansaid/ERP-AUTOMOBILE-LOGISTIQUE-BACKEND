@@ -20,11 +20,23 @@ const ALLOWED_KINDS = [
   'RECEIPT_PDF',
   'QUOTE_PDF',
   'PROFORMA_PDF',
+  'FACTURE_NORMALISEE',
+  'RECU_NORMALISE',
+  'DOCUMENT_DOUANE',
   'TRANSIT_DOCUMENT',
   'COMPANY_LOGO',
   'USER_AVATAR',
   'OTHER',
 ];
+
+// Pièces fiscales externes : le numéro du document est exigé, sinon la pièce
+// est inexploitable pour le rapprochement — on ne saurait pas à quoi elle
+// correspond une fois le fichier archivé.
+const FISCAL_KINDS = new Set([
+  'FACTURE_NORMALISEE',
+  'RECU_NORMALISE',
+  'DOCUMENT_DOUANE',
+]);
 
 // Whitelist de types acceptés par kind (simple protection)
 const ALLOWED_MIME = {
@@ -48,6 +60,10 @@ const ALLOWED_MIME = {
   RECEIPT_PDF: ['application/pdf'],
   QUOTE_PDF: ['application/pdf'],
   PROFORMA_PDF: ['application/pdf'],
+  // Les pièces fiscales arrivent souvent en photo prise au téléphone.
+  FACTURE_NORMALISEE: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic'],
+  RECU_NORMALISE: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic'],
+  DOCUMENT_DOUANE: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic'],
   OTHER: null, // tout accepté
 };
 
@@ -95,6 +111,39 @@ router.post(
         ? Number(req.body.resourceId)
         : null;
 
+      // Métadonnées de la pièce externe.
+      const docNumber = req.body.docNumber
+        ? String(req.body.docNumber).trim().slice(0, 100)
+        : null;
+      const docDate = req.body.docDate ? new Date(req.body.docDate) : null;
+      const docAmount =
+        req.body.docAmount != null && req.body.docAmount !== ''
+          ? Number(req.body.docAmount)
+          : null;
+
+      if (FISCAL_KINDS.has(kind)) {
+        if (!docNumber) {
+          return res.status(400).json({
+            message:
+              'Le numéro du document est requis pour une pièce fiscale : sans lui, la pièce ne peut pas être rapprochée.',
+            statusCode: 400,
+          });
+        }
+        if (!resource || !Number.isInteger(resourceId)) {
+          return res.status(400).json({
+            message:
+              'Une pièce fiscale doit être rattachée à une entité (resource + resourceId).',
+            statusCode: 400,
+          });
+        }
+      }
+      if (docDate && Number.isNaN(docDate.getTime())) {
+        return res.status(400).json({ message: 'docDate invalide', statusCode: 400 });
+      }
+      if (docAmount != null && Number.isNaN(docAmount)) {
+        return res.status(400).json({ message: 'docAmount invalide', statusCode: 400 });
+      }
+
       const storageKey = await putObject({
         kind,
         originalName: req.file.originalname,
@@ -113,6 +162,9 @@ router.post(
           mimeType: req.file.mimetype.slice(0, 100),
           sizeBytes: BigInt(req.file.size),
           storageKey,
+          docNumber,
+          docDate,
+          docAmount,
         },
       });
 
@@ -154,6 +206,84 @@ router.get('/', authorize('uploads', 'read'), async (req, res) => {
     return res.status(200).json({ uploads: rows.map(serialize) });
   } catch (err) {
     console.error('[uploads.list]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+/**
+ * GET /uploads/controle — pièces fiscales manquantes
+ *
+ * La plateforme n'émet pas de document certifié : c'est l'utilisateur qui
+ * rattache la pièce établie ailleurs. Ce contrôle répond donc à la seule
+ * question qui compte : « qu'est-ce qui a été vendu ou encaissé sans que la
+ * pièce correspondante ait été jointe ? »
+ *
+ * Déclarée AVANT `/:id`, sinon Express interpréterait « controle » comme un id.
+ */
+router.get('/controle', authorize('uploads', 'read'), async (req, res) => {
+  try {
+    const [invoices, receipts, attached] = await Promise.all([
+      prisma.invoice.findMany({
+        select: {
+          id: true,
+          invoiceNumber: true,
+          totalAmount: true,
+          createdAt: true,
+          client: { select: { name: true } },
+          vehicle: { select: { vin: true } },
+        },
+        orderBy: { id: 'desc' },
+        take: 500,
+      }),
+      prisma.receipt.findMany({
+        select: { id: true, receiptNumber: true, amount: true, paymentDate: true },
+        orderBy: { id: 'desc' },
+        take: 500,
+      }),
+      prisma.upload.findMany({
+        where: { kind: { in: ['FACTURE_NORMALISEE', 'RECU_NORMALISE'] } },
+        select: { resource: true, resourceId: true, kind: true },
+      }),
+    ]);
+
+    const has = new Set(attached.map((u) => `${u.resource}:${u.resourceId}`));
+
+    const facturesSansPiece = invoices
+      .filter((i) => !has.has(`invoices:${i.id}`))
+      .map((i) => ({
+        id: i.id,
+        numero: i.invoiceNumber,
+        montant: Number(i.totalAmount),
+        date: i.createdAt,
+        client: i.client?.name ?? null,
+        vin: i.vehicle?.vin ?? null,
+      }));
+
+    const recusSansPiece = receipts
+      .filter((r) => !has.has(`receipts:${r.id}`))
+      .map((r) => ({
+        id: r.id,
+        numero: r.receiptNumber,
+        montant: Number(r.amount),
+        date: r.paymentDate,
+      }));
+
+    return res.status(200).json({
+      factures: {
+        total: invoices.length,
+        sansPiece: facturesSansPiece.length,
+        montantSansPiece: facturesSansPiece.reduce((s, f) => s + f.montant, 0),
+        lignes: facturesSansPiece.slice(0, 100),
+      },
+      recus: {
+        total: receipts.length,
+        sansPiece: recusSansPiece.length,
+        montantSansPiece: recusSansPiece.reduce((s, r) => s + r.montant, 0),
+        lignes: recusSansPiece.slice(0, 100),
+      },
+    });
+  } catch (err) {
+    console.error('[uploads.controle]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
@@ -269,6 +399,9 @@ function serialize(row) {
     storageKey: row.storageKey,
     publicUrl: row.publicUrl,
     version: row.version,
+    docNumber: row.docNumber ?? null,
+    docDate: row.docDate ?? null,
+    docAmount: row.docAmount != null ? Number(row.docAmount) : null,
     createdAt: row.createdAt,
   };
 }

@@ -5,6 +5,15 @@
  */
 
 const { prisma } = require('../lib/prisma');
+const ledger = require('./ledgerBridge');
+
+// ---------------------------------------------------------------------------
+// PÉRIODE DE DOUBLE ÉCRITURE
+// Chaque hook alimente l'ancienne table `transactions_tresorerie` ET le
+// nouveau grand livre. On compare les totaux ; quand ils concordent sur
+// plusieurs semaines, les appels `createTreasuryTransaction` ci-dessous
+// disparaissent et seul le grand livre subsiste.
+// ---------------------------------------------------------------------------
 
 const CATEGORIES = {
   ENCAISSEMENT: { PAIEMENT_FACTURE: 'Paiement facture' },
@@ -90,6 +99,7 @@ async function onReceiptInvoice(companyId, receiptId, amount, paymentDate, refer
     vehicle_id: vehicleId,
     receipt_id: receiptId,
   });
+  await ledger.onReceiptInvoice({ receiptId, vehicleId, amount, paymentDate, reference });
 }
 
 /**
@@ -106,6 +116,9 @@ async function onReceiptWorkshopQuote(companyId, receiptId, amount, paymentDate,
     vehicle_id: vehicleId,
     receipt_id: receiptId,
     workshop_quote_id: workshopQuoteId,
+  });
+  await ledger.onReceiptWorkshopQuote({
+    receiptId, workshopQuoteId, vehicleId, amount, paymentDate, reference,
   });
 }
 
@@ -124,6 +137,7 @@ async function onPurchaseArrival(companyId, purchaseId, vehicleId, amount, trans
     vehicle_id: vehicleId,
     purchase_id: purchaseId,
   });
+  await ledger.onPurchaseArrival({ purchaseId, vehicleId, amount, transactionDate });
 }
 
 /**
@@ -167,6 +181,7 @@ async function upsertTransportForVehicle(companyId, vehicleId, amount, transacti
   } catch (err) {
     console.error('treasuryTransactions.upsertTransportForVehicle:', err.message);
   }
+  await ledger.onTransportFees({ vehicleId, amount, transactionDate });
 }
 
 /**
@@ -184,6 +199,7 @@ async function onChargeCreated(companyId, chargeId, amount, chargeDate, category
     description: label || null,
     charge_id: chargeId,
   });
+  await ledger.onChargeCreated({ chargeId, amount, chargeDate, label });
 }
 
 module.exports = {

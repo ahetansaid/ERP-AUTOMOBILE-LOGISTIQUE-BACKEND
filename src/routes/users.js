@@ -5,6 +5,21 @@ const { toSnake } = require('../lib/serialize');
 const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
+// Doit rester synchronisé avec l'enum UserRole (prisma/schema.prisma) et avec
+// le type UserRole du frontend (src/types/index.ts). Sans ce garde-fou, un rôle
+// inconnu remonte en erreur Prisma opaque (500) au lieu d'un 400 explicite.
+// PLATFORM_ADMIN est volontairement absent : il ne s'attribue pas via l'API.
+const USER_ROLES = [
+  'ADMIN',
+  'MANAGER',
+  'SALES',
+  'ACCOUNTING',
+  'WORKSHOP',
+  'LOGISTICS',
+  'USER',
+  'READ_ONLY',
+];
+
 router.get('/', authorize('users', 'read'), async (req, res) => {
   try {
     const users = await prisma.user.findMany({
@@ -34,6 +49,13 @@ router.post('/', authorize('users', 'create'), async (req, res) => {
     if (typeof b.password !== 'string' || b.password.length < 8) {
       return res.status(400).json({ message: 'Le mot de passe doit contenir au moins 8 caractères', statusCode: 400 });
     }
+    const role = b.role || 'USER';
+    if (!USER_ROLES.includes(role)) {
+      return res.status(400).json({
+        message: `Rôle invalide : ${role}. Valeurs acceptées : ${USER_ROLES.join(', ')}`,
+        statusCode: 400,
+      });
+    }
     const hash = await bcrypt.hash(b.password, 12);
     // companyId forcé au tenant courant (empêche la création cross-société).
     const created = await prisma.user.create({
@@ -42,7 +64,7 @@ router.post('/', authorize('users', 'create'), async (req, res) => {
         password: hash,
         firstName: b.firstName || null,
         lastName: b.lastName || null,
-        role: b.role || 'USER',
+        role,
         companyId: req.companyId ?? null,
       },
       select: {

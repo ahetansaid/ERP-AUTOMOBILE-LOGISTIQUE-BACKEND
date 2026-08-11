@@ -5,7 +5,7 @@
 // ============================================================================
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   // "native" = moteur local (dev). "rhel-openssl-3.0.x" = runtime Linux de
   // Vercel (serverless). Sans ça, la fonction crashe : "Query engine library
   // for current platform could not be found".
@@ -95,6 +95,12 @@ enum NotificationType {
 }
 
 enum UserRole {
+  // Éditeur de la plateforme. Seul rôle autorisé à opérer sur une autre
+  // société (?companyId=), chaque accès étant journalisé. À ne jamais
+  // attribuer à un utilisateur client.
+  PLATFORM_ADMIN
+  // Administrateur d'UNE société cliente (le gérant). Tous droits, mais
+  // strictement dans le périmètre de sa propre société.
   ADMIN
   MANAGER
   SALES
@@ -103,6 +109,9 @@ enum UserRole {
   LOGISTICS
   USER
   READ_ONLY
+  /// Acces EXTERNE : transitaire, prestataire ou client connecte a son propre
+  /// espace. Restreint aux dossiers de son tiers (voir middleware/partnerScope).
+  PARTNER
 }
 
 enum AuditAction {
@@ -121,14 +130,125 @@ enum AuditAction {
 enum UploadKind {
   VEHICLE_PHOTO
   PURCHASE_DOCUMENT
+  // Documents PRODUITS par la plateforme (PDF générés, archivés)
   INVOICE_PDF
   RECEIPT_PDF
   QUOTE_PDF
   PROFORMA_PDF
+  // Pièces fiscales EXTERNES, établies hors plateforme puis rattachées.
+  // La plateforme ne certifie pas : elle conserve et contrôle la présence.
+  FACTURE_NORMALISEE
+  RECU_NORMALISE
+  DOCUMENT_DOUANE
   TRANSIT_DOCUMENT
   COMPANY_LOGO
   USER_AVATAR
   OTHER
+}
+
+/// Nature SYSTÈME d'une écriture — liste fermée, non extensible par le client.
+///
+/// C'est le mécanisme qui rend la plateforme configurable sans casser les
+/// calculs : chaque société nomme et organise ses catégories comme elle veut,
+/// mais chacune porte une de ces natures, et le noyau ne raisonne que sur elles.
+/// Une catégorie nommée « Emprunt Farroukh » porte FINANCEMENT, donc reste
+/// hors résultat quel que soit son libellé.
+enum EntryNature {
+  ACHAT // prix d'acquisition du véhicule
+  LOGISTIQUE // fret, transport interne, commission
+  TAXE // douane, IMV, droits
+  MANUTENTION // dépotage, main d'œuvre portuaire
+  PREPARATION // atelier : pièces, peinture, soudure…
+  VENTE // produit de la vente — reconnu à l'émission de la facture
+  /// Encaissement d'une créance déjà reconnue en VENTE. Hors résultat : sans
+  /// cette distinction, une vente facturée puis encaissée serait comptée deux
+  /// fois dans le chiffre d'affaires.
+  REGLEMENT
+  CHARGE // frais généraux, non imputables à un véhicule
+  FINANCEMENT // emprunts et remboursements — hors résultat
+  COMPTE_ASSOCIE // apports et retraits des associés — hors résultat
+  TRANSFERT // mouvement entre deux comptes de trésorerie
+  AUTRE
+}
+
+/// Natures de compte de trésorerie. Séparer les comptes est ce qui empêche
+/// de mélanger l'argent de l'entreprise et celui des associés.
+enum CashAccountNature {
+  CAISSE
+  BANQUE
+  MOBILE_MONEY
+  AUTRE
+}
+
+/// Rôles d'un tiers. Un même tiers peut en cumuler plusieurs — un garage qui
+/// répare vos véhicules et vous en rachète est à la fois PRESTATAIRE et CLIENT.
+enum PartnerKind {
+  CLIENT
+  FOURNISSEUR
+  PRESTATAIRE
+  TRANSITAIRE
+  TRANSPORTEUR
+  ADMINISTRATION
+  AUTRE
+}
+
+/// Cycle de vie d'un rapport. La diffusion n'intervient qu'après approbation :
+/// un rapport non relu ne part pas.
+enum ReportStatus {
+  GENERE
+  EN_REVUE
+  APPROUVE
+  A_CORRIGER
+  DIFFUSE
+}
+
+enum ReportPeriodicity {
+  QUOTIDIEN
+  HEBDOMADAIRE
+  MENSUEL
+  PONCTUEL
+}
+
+/// Type de frais engagé au niveau d'un conteneur.
+/// Chacun est rattaché à une nature d'écriture — c'est ce lien qui garantit
+/// qu'un frais réparti entre bien dans le coût de revient.
+enum PurchaseCostType {
+  FRET
+  TRANSPORT_INTERNE
+  COMMISSION
+  DEPOTAGE
+  MAIN_OEUVRE
+  FRAIS_CONNEXE
+  IMV
+  DOUANE
+  AUTRE
+}
+
+/// Règle de répartition d'un frais de conteneur sur ses véhicules.
+///
+/// Rendre la règle EXPLICITE est tout l'intérêt : dans les classeurs, elle
+/// n'existait que dans la tête de celui qui tapait la formule — d'où des taux
+/// et des clés de répartition qui variaient d'une feuille à l'autre.
+enum AllocationMode {
+  PAR_VEHICULE // parts égales
+  PRORATA_VALEUR // au prorata du prix d'achat
+  PRORATA_POIDS // au prorata du poids (donné par le connaissement)
+  MONTANT_FIXE // montant explicite par véhicule
+}
+
+enum AlertSeverity {
+  INFO
+  ALERTE
+  CRITIQUE
+}
+
+/// Cycle d'une occurrence d'alerte.
+/// RESOLUE est posé automatiquement quand la condition cesse d'être vraie ;
+/// IGNOREE est un choix humain, qui empêche la réouverture.
+enum AlertStatus {
+  OUVERTE
+  RESOLUE
+  IGNOREE
 }
 
 enum EmailStatus {
@@ -202,7 +322,12 @@ model User {
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime? @updatedAt @map("updated_at")
 
+  /// Renseigné uniquement pour un ACCÈS EXTERNE : l'utilisateur voit alors
+  /// les seuls dossiers de ce tiers. Null = utilisateur interne.
+  partnerId Int? @map("partner_id")
+
   company             Company?             @relation(fields: [companyId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  partner             Partner?             @relation(fields: [partnerId], references: [id], onDelete: SetNull)
   sessions            Session[]
   passwordResetTokens PasswordResetToken[]
   notifications       Notification[]
@@ -211,6 +336,7 @@ model User {
   uploads             Upload[]
 
   @@index([companyId], map: "idx_users_company")
+  @@index([partnerId], map: "idx_users_partner")
   @@map("users")
 }
 
@@ -300,6 +426,56 @@ model AuditLog {
 }
 
 // ============================================================================
+// TIERS
+//
+// Principe : « être un tiers » et « avoir un accès » sont deux choses
+// différentes.
+//
+// Un prestataire comme « Jean · Peintre EURO » doit exister comme entité — pour
+// mesurer ce qu'il coûte, ses interventions, sa fiabilité — SANS avoir de compte.
+// À l'inverse, un transitaire pourra recevoir un accès limité à ses dossiers.
+//
+// Avant : les prestataires n'existaient que sous forme de texte libre dans
+// `workshop_quotes.prestataire`, avec toutes leurs variantes d'orthographe
+// (« Razack », « Soudeur Razack », « Razack (Soudeur EURO) »). Impossible de
+// totaliser quoi que ce soit.
+// ============================================================================
+
+model Partner {
+  id          Int           @id @default(autoincrement())
+  companyId   Int           @map("company_id")
+  name        String        @db.VarChar(255)
+  /// Clé de rapprochement : nom réduit en minuscules sans accent ni
+  /// ponctuation. Empêche de recréer « Jean EURO » à côté de « Jean (EURO) ».
+  slug        String        @db.VarChar(255)
+  kinds       PartnerKind[]
+  /// Métier, pour les prestataires : soudure, peinture, mécanique…
+  specialty   String?       @db.VarChar(120)
+  contactName String?       @map("contact_name") @db.VarChar(255)
+  email       String?       @db.VarChar(255)
+  phone       String?       @db.VarChar(50)
+  address     String?       @db.Text
+  city        String?       @db.VarChar(100)
+  country     String?       @db.VarChar(100)
+  legalNumber String?       @map("legal_number") @db.VarChar(100)
+  notes       String?       @db.Text
+  isActive    Boolean       @default(true) @map("is_active")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime?     @updatedAt @map("updated_at")
+
+  clients        Client[]
+  suppliers      Supplier[]
+  workshopQuotes WorkshopQuote[]
+  ledgerEntries  LedgerEntry[]
+  users          User[]
+
+  @@unique([companyId, slug], map: "uk_partner_company_slug")
+  @@index([companyId], map: "idx_partner_company")
+  @@index([kinds], map: "idx_partner_kinds")
+  @@map("partners")
+}
+
+// ============================================================================
 // TIERS (Fournisseurs / Clients)
 // ============================================================================
 
@@ -314,9 +490,15 @@ model Supplier {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime? @updatedAt @map("updated_at")
 
+  /// Rattachement au référentiel unifié. Nullable pendant la reprise :
+  /// l'ancien enregistrement continue de fonctionner sans lui.
+  partnerId Int? @map("partner_id")
+
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  partner Partner? @relation(fields: [partnerId], references: [id], onDelete: SetNull)
 
   @@index([companyId], map: "idx_suppliers_company")
+  @@index([partnerId], map: "idx_suppliers_partner")
   @@map("suppliers")
 }
 
@@ -335,12 +517,16 @@ model Client {
   createdAt   DateTime     @default(now()) @map("created_at")
   updatedAt   DateTime?    @updatedAt @map("updated_at")
 
+  partnerId Int? @map("partner_id")
+
   company   Company?   @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  partner   Partner?   @relation(fields: [partnerId], references: [id], onDelete: SetNull)
   vehicles  Vehicle[]
   invoices  Invoice[]
   proformas Proforma[]
 
   @@index([companyId], map: "idx_clients_company")
+  @@index([partnerId], map: "idx_clients_partner")
   @@map("clients")
 }
 
@@ -366,6 +552,9 @@ model Vehicle {
   mileage           Int?
   registration      String?       @db.VarChar(50)
   countryOrigin     String?       @map("country_origin") @db.VarChar(100)
+  /// Poids brut, tel que déclaré au connaissement. Sert de clé de répartition
+  /// au prorata du poids — donnée déjà présente sur vos BL, jamais exploitée.
+  weightKg          Int?          @map("weight_kg")
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime?     @updatedAt @map("updated_at")
 
@@ -401,6 +590,7 @@ model Purchase {
 
   company          Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
   purchaseVehicles PurchaseVehicle[]
+  costs            PurchaseCost[]
   treasuryTxs      TreasuryTransaction[]
 
   @@index([companyId], map: "idx_purchases_company")
@@ -432,6 +622,8 @@ model Invoice {
   vehicleId     Int           @unique(map: "uk_invoices_vehicle") @map("vehicle_id")
   clientId      Int           @map("client_id")
   totalAmount   Decimal       @map("total_amount") @db.Decimal(15, 2)
+  /// Unique par société : c'est la seule référence de la facture, la
+  /// plateforme ne produisant pas de pièce fiscale certifiée.
   invoiceNumber String        @map("invoice_number") @db.VarChar(50)
   dueDate       DateTime?     @map("due_date") @db.Date
   status        InvoiceStatus @default(EMISE)
@@ -443,6 +635,7 @@ model Invoice {
   client   Client    @relation(fields: [clientId], references: [id], onDelete: Restrict)
   receipts Receipt[]
 
+  @@unique([companyId, invoiceNumber], map: "uk_invoices_company_number")
   @@index([companyId], map: "idx_invoices_company")
   @@index([vehicleId], map: "idx_invoices_vehicle")
   @@index([clientId], map: "idx_invoices_client")
@@ -457,7 +650,11 @@ model Receipt {
   amount          Decimal  @db.Decimal(15, 2)
   paymentMethod   String?  @map("payment_method") @db.VarChar(50)
   paymentDate     DateTime @map("payment_date") @db.Date
+  /// Référence libre saisie par l'utilisateur (n° de virement, bordereau…).
+  /// À ne pas confondre avec receiptNumber, attribué par la plateforme.
   reference       String?  @db.VarChar(100)
+  /// Numéro du reçu, séquence atomique par société et par année (REC-2026-0001).
+  receiptNumber   String?  @map("receipt_number") @db.VarChar(50)
   createdAt       DateTime @default(now()) @map("created_at")
 
   company       Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
@@ -465,6 +662,7 @@ model Receipt {
   workshopQuote WorkshopQuote?        @relation(fields: [workshopQuoteId], references: [id], onDelete: SetNull)
   treasuryTxs   TreasuryTransaction[]
 
+  @@unique([companyId, receiptNumber], map: "uk_receipts_company_number")
   @@index([companyId], map: "idx_receipts_company")
   @@index([invoiceId], map: "idx_receipts_invoice")
   @@index([workshopQuoteId], map: "idx_receipts_workshop_quote")
@@ -495,7 +693,10 @@ model WorkshopQuote {
   id          Int                 @id @default(autoincrement())
   companyId   Int?                @map("company_id")
   vehicleId   Int                 @map("vehicle_id")
+  /// Texte libre historique, conservé pendant la reprise. La référence fiable
+  /// est partnerId : c'est lui qui permet de totaliser par prestataire.
   prestataire String              @db.VarChar(255)
+  partnerId   Int?                @map("partner_id")
   amount      Decimal             @db.Decimal(15, 2)
   currency    String              @default("FCFA") @db.VarChar(10)
   description String?             @db.Text
@@ -507,11 +708,13 @@ model WorkshopQuote {
 
   company     Company?              @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicle     Vehicle               @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  partner     Partner?              @relation(fields: [partnerId], references: [id], onDelete: SetNull)
   receipts    Receipt[]
   treasuryTxs TreasuryTransaction[]
 
   @@index([companyId], map: "idx_wq_company")
   @@index([vehicleId], map: "idx_wq_vehicle")
+  @@index([partnerId], map: "idx_wq_partner")
   @@index([status], map: "idx_wq_status")
   @@map("workshop_quotes")
 }
@@ -601,37 +804,348 @@ model TreasuryTransaction {
 // PARAMÉTRAGE & RAPPORTS
 // ============================================================================
 
-model ExchangeRate {
-  id        Int       @id @default(autoincrement())
-  companyId Int?      @map("company_id")
-  currency  String    @db.VarChar(10)
-  rateFcfa  Decimal   @map("rate_fcfa") @db.Decimal(15, 4)
-  isActive  Boolean   @default(true) @map("is_active")
+// ============================================================================
+// NOYAU — grand livre à double axe
+//
+// Tout mouvement d'argent est écrit UNE SEULE FOIS et porte simultanément :
+//   · un véhicule        (axe analytique  → coût de revient, marge)
+//   · un compte de caisse (axe financier  → solde de trésorerie)
+//
+// Aucune recopie n'est donc possible, donc aucune divergence. C'est la réponse
+// aux 7,6 M d'écart entre registres et aux 61 % de coûts de revient incomplets
+// relevés dans les classeurs.
+// ============================================================================
+
+/// Compte de trésorerie : caisse, banque, mobile money.
+model CashAccount {
+  id        Int               @id @default(autoincrement())
+  companyId Int               @map("company_id")
+  label     String            @db.VarChar(120)
+  nature    CashAccountNature @default(CAISSE)
+  currency  String            @default("FCFA") @db.VarChar(10)
+  isActive  Boolean           @default(true) @map("is_active")
+  sortOrder Int               @default(0) @map("sort_order")
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  entries LedgerEntry[]
+
+  @@unique([companyId, label], map: "uk_cash_account_company_label")
+  @@index([companyId], map: "idx_cash_account_company")
+  @@map("cash_accounts")
+}
+
+/// Catégorie de mouvement, propre à chaque société.
+/// Le client crée et nomme librement ; `nature` reste imposée.
+model CostCategory {
+  id        Int         @id @default(autoincrement())
+  companyId Int         @map("company_id")
+  label     String      @db.VarChar(120)
+  nature    EntryNature
+  isActive  Boolean     @default(true) @map("is_active")
+  sortOrder Int         @default(0) @map("sort_order")
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  entries LedgerEntry[]
+
+  @@unique([companyId, label], map: "uk_cost_category_company_label")
+  @@index([companyId], map: "idx_cost_category_company")
+  @@map("cost_categories")
+}
+
+/// Écriture du grand livre. IMMUABLE : jamais modifiée, jamais supprimée.
+/// Une correction produit une écriture inverse (`reversesId`) — c'est
+/// l'engagement E3 du contrat de projet, et l'extension Prisma refuse
+/// physiquement tout update/delete sur cette table.
+model LedgerEntry {
+  id        BigInt      @id @default(autoincrement())
+  companyId Int         @map("company_id")
+  entryDate DateTime    @map("entry_date") @db.Date
+  nature    EntryNature
+  label     String      @db.VarChar(255)
+
+  /// Montant SIGNÉ du point de vue de l'entreprise :
+  /// négatif = sortie, positif = entrée. Le solde d'un compte est donc une
+  /// simple somme — jamais une valeur saisie.
+  amount      Decimal  @db.Decimal(15, 2)
+  currency    String   @default("FCFA") @db.VarChar(10)
+  /// Taux FIGÉ au moment de la saisie : un conteneur de mars reste converti au
+  /// taux de mars, même si le taux courant change ensuite.
+  rateApplied Decimal? @map("rate_applied") @db.Decimal(15, 4)
+  amountFcfa  Decimal  @map("amount_fcfa") @db.Decimal(15, 2)
+
+  // ── Les deux axes ────────────────────────────────────────────────────────
+  vehicleId     Int? @map("vehicle_id")
+  cashAccountId Int? @map("cash_account_id")
+
+  // ── Rattachements d'origine (traçabilité vers le document source) ────────
+  categoryId      Int? @map("category_id")
+  purchaseId      Int? @map("purchase_id")
+  invoiceId       Int? @map("invoice_id")
+  receiptId       Int? @map("receipt_id")
+  workshopQuoteId Int? @map("workshop_quote_id")
+  chargeId        Int? @map("charge_id")
+  /// Frais de conteneur dont cette écriture est issue. Permet de rejouer ou
+  /// d'annuler une répartition entière.
+  purchaseCostId  Int? @map("purchase_cost_id")
+  /// Tiers concerné par le mouvement. C'est lui qui rend possible la question
+  /// « combien m'a coûté ce prestataire cette année ? ».
+  partnerId       Int? @map("partner_id")
+
+  /// Écriture annulée par celle-ci. Une écriture ne peut être contre-passée
+  /// qu'une fois — d'où l'unicité.
+  reversesId    BigInt?  @unique(map: "uk_ledger_reverses") @map("reverses_id")
+  reversalNote  String?  @map("reversal_note") @db.Text
+  correlationId String?  @map("correlation_id") @db.VarChar(64)
+  createdBy     Int?     @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  cashAccount  CashAccount?  @relation(fields: [cashAccountId], references: [id], onDelete: Restrict)
+  category     CostCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  partner      Partner?      @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  purchaseCost PurchaseCost? @relation(fields: [purchaseCostId], references: [id], onDelete: SetNull)
+
+  @@index([companyId], map: "idx_ledger_company")
+  @@index([vehicleId], map: "idx_ledger_vehicle")
+  @@index([cashAccountId, entryDate], map: "idx_ledger_account_date")
+  @@index([entryDate], map: "idx_ledger_date")
+  @@index([nature], map: "idx_ledger_nature")
+  @@index([partnerId], map: "idx_ledger_partner")
+  @@index([purchaseCostId], map: "idx_ledger_pcost")
+  @@index([correlationId], map: "idx_ledger_correlation")
+  @@map("ledger_entries")
+}
+
+/// Frais engagé au niveau d'un conteneur, puis réparti sur ses véhicules.
+///
+/// C'est le chaînon qui manquait aux classeurs : le fret et la manutention y
+/// étaient saisis globalement, puis ventilés par une formule tapée à la main —
+/// avec des taux qui variaient d'une ligne à l'autre au sein d'un même
+/// conteneur. Ici, la règle est un objet : elle est stockée, auditable, et
+/// rejouée à l'identique quand la composition du conteneur change.
+model PurchaseCost {
+  id         Int              @id @default(autoincrement())
+  companyId  Int              @map("company_id")
+  purchaseId Int              @map("purchase_id")
+  type       PurchaseCostType
+  label      String?          @db.VarChar(255)
+
+  amount      Decimal  @db.Decimal(15, 2)
+  currency    String   @default("FCFA") @db.VarChar(10)
+  /// Taux FIGÉ à la saisie. Un conteneur de mars reste converti au taux de mars.
+  rateApplied Decimal? @map("rate_applied") @db.Decimal(15, 4)
+  amountFcfa  Decimal  @map("amount_fcfa") @db.Decimal(15, 2)
+
+  allocation       AllocationMode @default(PAR_VEHICULE)
+  /// Pour MONTANT_FIXE : { "<vehicleId>": montant }.
+  allocationDetail Json?          @map("allocation_detail") @db.JsonB
+  /// Date de valeur des écritures générées.
+  costDate         DateTime       @map("cost_date") @db.Date
+  /// Horodatage de la dernière ventilation effective.
+  allocatedAt      DateTime?      @map("allocated_at")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @updatedAt @map("updated_at")
 
+  purchase Purchase      @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  entries  LedgerEntry[]
+
+  @@index([companyId], map: "idx_pcost_company")
+  @@index([purchaseId], map: "idx_pcost_purchase")
+  @@map("purchase_costs")
+}
+
+// ============================================================================
+// ALERTES
+//
+// Le moteur rejoue en continu l'audit qui avait été fait à la main sur les
+// classeurs : dépense non rattachée, taux incohérent, véhicule dormant, journée
+// non saisie. Ce que personne ne peut voir en feuilletant un tableur, la
+// plateforme le signale.
+// ============================================================================
+
+/// Règle activée par une société. Le `code` désigne un évaluateur de la
+/// bibliothèque (src/lib/alerts/rules.js) ; `params` en règle les seuils.
+///
+/// Le client active, désactive et ajuste — il ne programme pas. C'est ce qui
+/// rend le moteur utilisable par un gérant plutôt que par un intégrateur.
+model AlertRule {
+  id           Int           @id @default(autoincrement())
+  companyId    Int           @map("company_id")
+  code         String        @db.VarChar(60)
+  label        String        @db.VarChar(255)
+  severity     AlertSeverity @default(ALERTE)
+  enabled      Boolean       @default(true)
+  /// Seuils propres à la règle : { jours: 60 }, { seuil: 500000 }…
+  params       Json?         @db.JsonB
+  /// Canaux de diffusion : ["inapp", "email"].
+  channels     String[]      @default(["inapp"])
+  /// Rôles destinataires. Vide = tous les utilisateurs internes.
+  targetRoles  String[]      @default([]) @map("target_roles")
+  /// Rappel tant que la condition reste vraie, en jours. 0 = pas de rappel.
+  reminderDays Int           @default(7) @map("reminder_days")
+  lastRunAt    DateTime?     @map("last_run_at")
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  events AlertEvent[]
+
+  @@unique([companyId, code], map: "uk_alert_rule_company_code")
+  @@index([companyId], map: "idx_alert_rule_company")
+  @@map("alert_rules")
+}
+
+/// Occurrence d'une alerte.
+///
+/// Identifiée par (règle, entité) : une même anomalie détectée à chaque passage
+/// met à jour l'occurrence existante au lieu d'en créer une nouvelle. Sans cette
+/// clé, le moteur produirait des centaines de doublons par semaine et
+/// deviendrait inutilisable.
+model AlertEvent {
+  id          BigInt        @id @default(autoincrement())
+  companyId   Int           @map("company_id")
+  ruleId      Int           @map("rule_id")
+  severity    AlertSeverity
+  status      AlertStatus   @default(OUVERTE)
+  /// Entité concernée, pour ouvrir le dossier 360° d'un clic.
+  entityType  String?       @map("entity_type") @db.VarChar(50)
+  entityId    Int?          @map("entity_id")
+  title       String        @db.VarChar(255)
+  detail      String?       @db.Text
+  /// Valeur mesurée : nombre de jours, montant, ratio…
+  value       Decimal?      @db.Decimal(15, 2)
+  firstSeenAt DateTime      @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime      @default(now()) @map("last_seen_at")
+  notifiedAt  DateTime?     @map("notified_at")
+  resolvedAt  DateTime?     @map("resolved_at")
+
+  rule AlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, ruleId, entityType, entityId], map: "uk_alert_event_key")
+  @@index([companyId, status], map: "idx_alert_event_status")
+  @@index([ruleId], map: "idx_alert_event_rule")
+  @@map("alert_events")
+}
+
+/// Index de recherche universelle.
+///
+/// Une seule table pour toutes les entités : on tape un numéro quelconque —
+/// VIN complet ou six derniers caractères, conteneur, navire, connaissement,
+/// facture, tiers — et on retrouve le dossier.
+///
+/// Maintenue automatiquement par l'extension Prisma à chaque écriture : elle ne
+/// peut pas se désynchroniser, puisque personne n'a à penser à la mettre à jour.
+model SearchIndex {
+  id          BigInt   @id @default(autoincrement())
+  companyId   Int      @map("company_id")
+  /// Nom du modèle Prisma : Vehicle, Invoice, Purchase…
+  entityType  String   @map("entity_type") @db.VarChar(50)
+  entityId    Int      @map("entity_id")
+  /// Étiquette courte affichée dans les résultats.
+  label       String   @db.VarChar(255)
+  subtitle    String?  @db.VarChar(255)
+  /// Identifiants exacts recherchables : VIN, 6 derniers caractères, numéro de
+  /// conteneur, de facture… C'est ce qui permet de taper « 852354 ».
+  identifiers String[]
+  /// Texte libre, pour la recherche approchée quand aucun identifiant ne matche.
+  searchText  String   @map("search_text") @db.Text
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, entityType, entityId], map: "uk_search_entity")
+  @@index([companyId], map: "idx_search_company")
+  @@index([identifiers], map: "idx_search_identifiers")
+  @@map("search_index")
+}
+
+/// Séquence de numérotation par société, type de document et année.
+/// Incrémentée par un seul UPDATE atomique (voir src/lib/numbering.js) : deux
+/// requêtes simultanées ne peuvent pas obtenir le même numéro.
+model DocumentCounter {
+  id         Int      @id @default(autoincrement())
+  companyId  Int      @map("company_id")
+  docType    String   @map("doc_type") @db.VarChar(30) // INVOICE | RECEIPT | QUOTE | PROFORMA
+  year       Int
+  lastNumber Int      @default(0) @map("last_number")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, docType, year], map: "uk_counter_company_type_year")
+  @@map("document_counters")
+}
+
+model ExchangeRate {
+  id            Int       @id @default(autoincrement())
+  companyId     Int?      @map("company_id")
+  currency      String    @db.VarChar(10)
+  rateFcfa      Decimal   @map("rate_fcfa") @db.Decimal(15, 4)
+  /// Date à partir de laquelle ce taux s'applique. Sans elle, changer le taux
+  /// recalculait rétroactivement tout l'historique — le défaut même des
+  /// classeurs, où le taux vivait dans la formule.
+  effectiveDate DateTime  @default(now()) @map("effective_date") @db.Date
+  isActive      Boolean   @default(true) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime? @updatedAt @map("updated_at")
+
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
 
-  @@unique([companyId, currency], map: "uk_er_company_currency")
+  @@unique([companyId, currency, effectiveDate], map: "uk_er_company_currency_date")
   @@index([companyId], map: "idx_er_company")
   @@map("exchange_rates")
 }
 
+/// Rapport périodique.
+///
+/// Point décisif : le rapport stocke un INSTANTANÉ FIGÉ de ses données
+/// (`payload`), pas seulement un lien vers un fichier. Sans cela, rouvrir le
+/// rapport du 8 juillet dans trois mois afficherait des chiffres différents —
+/// et l'approbation ne vaudrait plus rien. Un rapport est une pièce, pas une vue.
 model GeneratedReport {
-  id          Int       @id @default(autoincrement())
-  companyId   Int?      @map("company_id")
-  name        String?   @db.VarChar(255)
-  type        String?   @db.VarChar(50)
-  periodStart DateTime? @map("period_start") @db.Date
-  periodEnd   DateTime? @map("period_end") @db.Date
-  filePath    String?   @map("file_path") @db.VarChar(500)
-  createdAt   DateTime  @default(now()) @map("created_at")
+  id          Int               @id @default(autoincrement())
+  companyId   Int?              @map("company_id")
+  name        String?           @db.VarChar(255)
+  type        String?           @db.VarChar(50)
+  periodicity ReportPeriodicity @default(PONCTUEL)
+  periodStart DateTime?         @map("period_start") @db.Date
+  periodEnd   DateTime?         @map("period_end") @db.Date
+  filePath    String?           @map("file_path") @db.VarChar(500)
 
-  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  status        ReportStatus @default(GENERE)
+  /// Données figées au moment de la génération. C'est ce qui est approuvé.
+  payload       Json?        @db.JsonB
+  approvedBy    Int?         @map("approved_by")
+  approvedAt    DateTime?    @map("approved_at")
+  /// Motif renseigné quand le rapport est renvoyé en correction.
+  reviewNote    String?      @map("review_note") @db.Text
+  distributedAt DateTime?    @map("distributed_at")
 
+  createdAt DateTime @default(now()) @map("created_at")
+
+  company  Company?        @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  comments ReportComment[]
+
+  @@unique([companyId, type, periodStart, periodEnd], map: "uk_gr_period")
   @@index([companyId], map: "idx_gr_company")
   @@index([createdAt], map: "idx_gr_created")
+  @@index([status], map: "idx_gr_status")
   @@map("generated_reports")
+}
+
+/// Précision apportée à un rapport, éventuellement ancrée à une ligne.
+///
+/// L'ancrage est ce qui distingue une vraie revue d'un simple commentaire :
+/// « cette ligne-ci doit être reclassée » plutôt que « il y a un problème ».
+model ReportComment {
+  id        Int      @id @default(autoincrement())
+  companyId Int      @map("company_id")
+  reportId  Int      @map("report_id")
+  userId    Int?     @map("user_id")
+  body      String   @db.Text
+  /// Référence de la ligne visée dans le payload (ex. « operations.12 »).
+  anchor    String?  @db.VarChar(120)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  report GeneratedReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId], map: "idx_rc_report")
+  @@index([companyId], map: "idx_rc_company")
+  @@map("report_comments")
 }
 
 // ============================================================================
@@ -699,7 +1213,15 @@ model Upload {
   storageKey String     @map("storage_key") @db.VarChar(500) // clé S3/MinIO
   publicUrl  String?    @map("public_url") @db.VarChar(500)
   version    Int        @default(1)
-  createdAt  DateTime   @default(now()) @map("created_at")
+
+  /// Références de la pièce EXTERNE (facture normalisée, quittance douanière…).
+  /// Renseignées à la main au moment du rattachement : sans elles, impossible
+  /// de rapprocher la pièce du document interne ni de la retrouver par son numéro.
+  docNumber String?   @map("doc_number") @db.VarChar(100)
+  docDate   DateTime? @map("doc_date") @db.Date
+  docAmount Decimal?  @map("doc_amount") @db.Decimal(15, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
   user    User?    @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
@@ -708,5 +1230,6 @@ model Upload {
   @@index([uploadedBy], map: "idx_uploads_user")
   @@index([resource, resourceId], map: "idx_uploads_resource")
   @@index([kind], map: "idx_uploads_kind")
+  @@index([docNumber], map: "idx_uploads_doc_number")
   @@map("uploads")
 }

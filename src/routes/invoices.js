@@ -1,6 +1,8 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
+const { nextDocumentNumber } = require('../lib/numbering');
+const ledgerBridge = require('../services/ledgerBridge');
 const { authorize } = require('../middleware/rbac');
 // @react-pdf/renderer est lourd : on le charge paresseusement (require dans le
 // handler PDF) pour ne pas l'embarquer dans le démarrage à froid serverless.
@@ -134,19 +136,13 @@ router.post('/', authorize('invoices', 'create'), async (req, res) => {
       });
     }
 
-    // Numéro de facture : FAV-{année}-{séquence 4 chiffres} (séquence par année).
-    const y = new Date().getFullYear();
-    const yearInvoices = await prisma.invoice.findMany({
-      where: { ...req.tenantWhere(), createdAt: { gte: new Date(y, 0, 1), lt: new Date(y + 1, 0, 1) } },
-      select: { invoiceNumber: true },
-    });
-    let maxN = 0;
-    for (const inv of yearInvoices) {
-      const num = parseInt(String(inv.invoiceNumber || '').slice(-4), 10);
-      if (!isNaN(num) && num > maxN) maxN = num;
-    }
-    const n = String(maxN + 1).padStart(4, '0');
-    const invoice_number = 'FAV-' + y + '-' + n;
+    // Numéro de facture : FAV-{année}-{séquence 4 chiffres}, réservé de façon
+    // atomique (voir src/lib/numbering.js). Deux créations simultanées ne
+    // peuvent plus obtenir le même numéro.
+    const { number: invoice_number } = await nextDocumentNumber(
+      req.companyId,
+      'INVOICE'
+    );
 
     await prisma.invoice.create({
       data: {
@@ -163,6 +159,16 @@ router.post('/', authorize('invoices', 'create'), async (req, res) => {
       where: { vehicleId: Number(vehicleId) },
       include: { client: { select: { name: true } }, vehicle: { select: { vin: true } } },
     });
+    // Le produit de la vente est reconnu ici, à l'émission — pas à
+    // l'encaissement, qui n'est qu'un mouvement de trésorerie (REGLEMENT).
+    await ledgerBridge.onInvoiceIssued({
+      invoiceId: created.id,
+      vehicleId: Number(vehicleId),
+      amount: amountToUse,
+      issuedAt: created.createdAt,
+      label: `Vente ${invoice_number}`,
+    });
+
     const { client, vehicle: veh, ...rest } = created;
     return res.status(201).json({
       ...toSnake(rest),

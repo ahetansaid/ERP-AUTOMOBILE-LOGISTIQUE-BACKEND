@@ -18,7 +18,8 @@ const { prisma } = require('../lib/prisma');
 // Permissions par défaut attribuées à chaque rôle.
 // Format : { role: { module: [actions] | '*' } } ; '*' = toutes actions.
 const ROLE_PERMISSIONS = {
-  ADMIN: '*', // accès total
+  PLATFORM_ADMIN: '*', // éditeur de la plateforme (support), accès tracé
+  ADMIN: '*', // gérant d'une société — total, mais dans SA société uniquement
   MANAGER: {
     clients: '*',
     suppliers: '*',
@@ -79,6 +80,16 @@ const ROLE_PERMISSIONS = {
   USER: {
     dashboard: ['read'],
     notifications: ['read', 'update'],
+  },
+  // Accès EXTERNE (transitaire, prestataire, client). Volontairement étroit :
+  // ce rôle ne donne accès qu'à ses propres dossiers, jamais au reste de la
+  // société. Le filtrage par tiers est appliqué au-delà de ce contrôle.
+  PARTNER: {
+    dashboard: ['read'],
+    notifications: ['read', 'update'],
+    uploads: ['create', 'read'],
+    transit: ['read'],
+    invoices: ['read'],
   },
   READ_ONLY: {
     // lecture seule partout (pas de create/update/delete)

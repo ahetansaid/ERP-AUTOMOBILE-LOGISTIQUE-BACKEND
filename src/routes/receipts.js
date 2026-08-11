@@ -3,6 +3,7 @@ const { prisma } = require('../lib/prisma');
 const { toSnake } = require('../lib/serialize');
 const { onReceiptInvoice, onReceiptWorkshopQuote } = require('../services/treasuryTransactions');
 const { notify } = require('../services/notifications');
+const { nextDocumentNumber } = require('../lib/numbering');
 const { authorize } = require('../middleware/rbac');
 const router = express.Router();
 
@@ -235,9 +236,11 @@ router.post('/', authorize('receipts', 'create'), async (req, res) => {
           remaining_amount: remainingBefore,
         });
       }
+      const { number: receiptNumber } = await nextDocumentNumber(req.companyId, 'RECEIPT');
       created = await prisma.receipt.create({
         data: {
           companyId: req.companyId ?? null,
+          receiptNumber,
           workshopQuoteId: Number(devisId),
           amount,
           paymentMethod,
@@ -277,9 +280,11 @@ router.post('/', authorize('receipts', 'create'), async (req, res) => {
           remaining_amount: remainingBefore,
         });
       }
+      const { number: receiptNumber } = await nextDocumentNumber(req.companyId, 'RECEIPT');
       created = await prisma.receipt.create({
         data: {
           companyId: req.companyId ?? null,
+          receiptNumber,
           invoiceId: Number(invoiceId),
           amount,
           paymentMethod,

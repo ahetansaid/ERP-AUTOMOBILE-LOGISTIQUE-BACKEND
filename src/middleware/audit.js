@@ -45,8 +45,17 @@ function sanitize(value) {
   return out;
 }
 
+// Les créations, mises à jour et suppressions sont désormais tracées
+// automatiquement par l'extension Prisma (src/lib/prisma.js), avec before/after.
+// On ignore donc ici les appels CRUD des routes pour ne pas doubler chaque
+// écriture. `req.audit` reste utile pour les événements non-CRUD, que la couche
+// base de données ne peut pas deviner : connexion, export, changement de droits.
+const COVERED_BY_EXTENSION = new Set(['CREATE', 'UPDATE', 'DELETE']);
+
 function attachAudit(req, res, next) {
   req.audit = function audit({ action, resource, resourceId, before, after }) {
+    if (COVERED_BY_EXTENSION.has(action)) return;
+
     const payload = {
       action,
       resource,
