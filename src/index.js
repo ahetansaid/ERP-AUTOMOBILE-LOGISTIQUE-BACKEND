@@ -27,6 +27,7 @@ const searchRoutes = require('./routes/search');
 const rapportsRoutes = require('./routes/reportsPeriodiques');
 const alertesRoutes = require('./routes/alertes');
 const fraisRoutes = require('./routes/purchaseCosts');
+const installationRoutes = require('./routes/installation');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
@@ -109,6 +110,7 @@ function mount(prefix) {
   app.use(`${prefix}/rapports`, ...guarded, rapportsRoutes);
   app.use(`${prefix}/alertes`, ...guarded, alertesRoutes);
   app.use(`${prefix}/frais-conteneur`, ...guarded, fraisRoutes);
+  app.use(`${prefix}/installation`, ...guarded, installationRoutes);
 }
 
 mount('');
