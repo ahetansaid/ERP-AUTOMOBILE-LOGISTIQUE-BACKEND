@@ -14,7 +14,12 @@ const {
   generateQrDataUrl,
   verifyToken,
 } = require('../lib/twofa');
-const { JWT_SECRET, JWT_REFRESH_SECRET, authMiddleware } = require('../middleware/auth');
+const {
+  JWT_SECRET,
+  JWT_REFRESH_SECRET,
+  authMiddleware,
+  ROUTES_TELECHARGEMENT,
+} = require('../middleware/auth');
 
 const router = express.Router();
 const EXPIRES_IN = '30m';
@@ -377,6 +382,43 @@ router.post('/reset-password', async (req, res) => {
     });
   } catch (err) {
     console.error('[reset-password]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+/**
+ * POST /auth/download-token { resource, resourceId }
+ *
+ * Émet un jeton limité à une ressource et valable deux minutes, pour les
+ * téléchargements ouverts par `window.open` qui ne peuvent pas porter
+ * d'en-tête `Authorization`.
+ *
+ * Cette route exige une session valide : le jeton court n'est qu'une
+ * projection étroite d'un accès déjà accordé, jamais un moyen d'en obtenir un.
+ */
+router.post('/download-token', authMiddleware, (req, res) => {
+  try {
+    const { issueDownloadToken, TTL_SECONDS } = require('../lib/downloadToken');
+    const resource = String(req.body?.resource || '');
+    const resourceId = req.body?.resourceId;
+
+    const autorisees = ROUTES_TELECHARGEMENT.map((r) => r.ressource);
+    if (!autorisees.includes(resource)) {
+      return res.status(400).json({
+        message: `Ressource non téléchargeable : ${resource}. Valeurs : ${autorisees.join(', ')}`,
+        statusCode: 400,
+      });
+    }
+    if (!/^\d+$/.test(String(resourceId))) {
+      return res.status(400).json({ message: 'resourceId invalide', statusCode: 400 });
+    }
+
+    return res.status(200).json({
+      token: issueDownloadToken(req.user, resource, resourceId),
+      expiresIn: TTL_SECONDS,
+    });
+  } catch (err) {
+    console.error('[auth.download-token]', err.message);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });

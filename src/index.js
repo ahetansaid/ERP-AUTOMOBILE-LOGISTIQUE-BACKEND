@@ -28,7 +28,7 @@ const rapportsRoutes = require('./routes/reportsPeriodiques');
 const alertesRoutes = require('./routes/alertes');
 const fraisRoutes = require('./routes/purchaseCosts');
 const installationRoutes = require('./routes/installation');
-const { authMiddleware } = require('./middleware/auth');
+const { authMiddleware, downloadTokenBridge } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
 const { withContext } = require('./lib/context');
@@ -39,22 +39,30 @@ const log = logger('http');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// CORS_ORIGIN peut contenir plusieurs origines séparées par des virgules,
-// ou "*" pour tout autoriser. On reflète l'origine de la requête quand elle
-// est autorisée (compatible avec credentials: true, contrairement à un "*"
-// brut que les navigateurs rejettent).
+// CORS_ORIGIN contient les origines autorisées, séparées par des virgules.
+// On reflète l'origine de la requête quand elle est dans la liste : c'est la
+// seule forme compatible avec credentials: true, un "*" brut étant rejeté par
+// les navigateurs dès qu'il y a des identifiants.
 const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 
+// `credentials: true` avec une origine « * » laisse n'importe quel site faire
+// des requêtes authentifiées au nom de l'utilisateur connecté. La combinaison
+// est refusée au démarrage plutôt que tolérée silencieusement.
+if (allowedOrigins.includes('*')) {
+  throw new Error(
+    'CORS_ORIGIN="*" est incompatible avec les requêtes authentifiées. ' +
+      'Listez les origines autorisées, séparées par des virgules.'
+  );
+}
+
 const corsOptions = {
   origin: (origin, cb) => {
     // Requêtes sans Origin (curl, server-to-server, health checks) : autorisées.
     if (!origin) return cb(null, true);
-    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      return cb(null, true);
-    }
+    if (allowedOrigins.includes(origin)) return cb(null, true);
     return cb(new Error(`Origine non autorisée par CORS : ${origin}`));
   },
   credentials: true,
@@ -70,6 +78,9 @@ app.use(cors(corsOptions));
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(attachAudit);
+// Avant les routes gardées : seule cette passerelle accepte un jeton en query
+// string, et uniquement sur les URL de téléchargement.
+app.use(downloadTokenBridge);
 
 // Rate limiting agressif sur l'authentification (anti brute-force / credential stuffing).
 const authLimiter = rateLimit({
