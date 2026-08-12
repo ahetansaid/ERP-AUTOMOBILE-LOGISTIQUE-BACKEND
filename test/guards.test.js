@@ -230,3 +230,34 @@ test('postEntry accepte purchaseCostId — il ne peut plus être posé après co
     'allocation.js ne doit plus tenter de modifier le grand livre'
   );
 });
+
+/* ── E3 — un audit doit désigner sa ressource ─────────────────────────────── */
+
+const { idAuditable } = require('../src/lib/prisma');
+
+test('un identifiant BigInt est auditable — c’est celui du grand livre', () => {
+  // LedgerEntry et AlertEvent ont un identifiant BigInt. Le rejeter revenait à
+  // écrire 1 249 audits pointant vers rien.
+  assert.equal(idAuditable(1n), 1);
+  assert.equal(idAuditable(1249n), 1249);
+});
+
+test('un identifiant entier reste inchangé', () => {
+  assert.equal(idAuditable(42), 42);
+  assert.equal(idAuditable(0), 0, 'zéro est un identifiant, pas une absence');
+});
+
+test('un identifiant hors capacité de la colonne est déclaré absent, jamais tronqué', () => {
+  // resource_id est un entier signé : au-delà, un dépassement silencieux
+  // désignerait la mauvaise ressource. Un trou déclaré vaut mieux.
+  assert.equal(idAuditable(2147483648n), null);
+  assert.equal(idAuditable(-1n), null);
+  assert.equal(idAuditable(Number.MAX_SAFE_INTEGER + 2), null);
+});
+
+test('ce qui n’est pas un identifiant ne devient pas un identifiant', () => {
+  assert.equal(idAuditable(undefined), null);
+  assert.equal(idAuditable(null), null);
+  assert.equal(idAuditable('42'), null);
+  assert.equal(idAuditable({ in: [1, 2] }), null, 'un where composite ne désigne pas une ressource');
+});

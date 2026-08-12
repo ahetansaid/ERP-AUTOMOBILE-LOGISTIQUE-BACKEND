@@ -115,6 +115,33 @@ function sanitize(value, depth = 0) {
   return out;
 }
 
+/**
+ * Identifiant exploitable pour `AuditLog.resourceId`, qui est un entier.
+ *
+ * LedgerEntry et AlertEvent ont un identifiant BigInt. L'ancien test
+ * `typeof id === 'number'` les rejetait tous : les 1 249 écritures du grand
+ * livre étaient auditées avec un resourceId NUL — la trace existait mais ne
+ * désignait rien, et l'index (resource, resourceId) ne servait à rien. Pire,
+ * sur une mise à jour le BigInt partait tel quel vers une colonne entière et
+ * l'écriture du journal échouait : la trace était perdue.
+ *
+ * Un audit qui ne pointe nulle part n'est pas un audit. C'est l'engagement E3
+ * qui tombait, silencieusement.
+ *
+ * Retourne `null` au-delà de la capacité d'un entier signé — la colonne ne
+ * saurait pas le stocker, et un dépassement silencieux vaudrait moins qu'un
+ * trou déclaré.
+ */
+const MAX_INT4 = 2147483647;
+
+function idAuditable(valeur) {
+  if (typeof valeur === 'number') return Number.isSafeInteger(valeur) ? valeur : null;
+  if (typeof valeur === 'bigint') {
+    return valeur >= 0n && valeur <= BigInt(MAX_INT4) ? Number(valeur) : null;
+  }
+  return null;
+}
+
 /** Écrit le journal sans bloquer la réponse, et via le client brut (pas de récursion). */
 function writeAudit(entry) {
   base.auditLog
@@ -240,9 +267,9 @@ const prisma = base.$extends({
         if (audited) {
           const single = !operation.endsWith('Many');
           const resourceId =
-            (single && result && typeof result.id === 'number' && result.id) ||
-            (before && before.id) ||
-            (typeof args.where?.id === 'number' ? args.where.id : null);
+            (single ? idAuditable(result?.id) : null) ??
+            idAuditable(before?.id) ??
+            idAuditable(args.where?.id);
 
           writeAudit({
             companyId: ctx.companyId ?? null,
@@ -277,4 +304,5 @@ module.exports = {
   disconnect,
   TENANT_MODELS: ALL_TENANT_MODELS,
   TENANT_BY_ID_MODELS,
+  idAuditable,
 };
