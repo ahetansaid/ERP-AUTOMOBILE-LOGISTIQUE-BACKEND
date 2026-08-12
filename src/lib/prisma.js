@@ -141,13 +141,16 @@ const prisma = base.$extends({
             );
           }
 
-          if (READ_OPS.has(operation) || WRITE_WHERE_OPS.has(operation)) {
+          if (
+            READ_OPS.has(operation) ||
+            WRITE_WHERE_OPS.has(operation) ||
+            // `findUnique` accepte des champs non uniques dans son `where`
+            // depuis Prisma 5, dès lors qu'un critère unique y figure aussi.
+            // Inutile donc de le convertir en `findFirst` — et impossible :
+            // une extension ne peut pas changer l'opération exécutée.
+            UNIQUE_READ_OPS.has(operation)
+          ) {
             args.where = { ...(args.where || {}), companyId: cid };
-          } else if (UNIQUE_READ_OPS.has(operation)) {
-            // `findUnique` n'accepte pas de filtre non unique : on le convertit
-            // en `findFirst`, qui a la même forme de retour.
-            args.where = { ...(args.where || {}), companyId: cid };
-            operation = operation === 'findUnique' ? 'findFirst' : 'findFirstOrThrow';
           } else if (CREATE_OPS.has(operation)) {
             if (operation === 'createMany') {
               const rows = Array.isArray(args.data) ? args.data : [args.data];
@@ -177,7 +180,9 @@ const prisma = base.$extends({
           }
         }
 
-        const result = await query(args, operation);
+        // `query` n'attend QUE les arguments : lui passer l'opération corrompt
+        // son contexte interne et produit une erreur Prisma opaque.
+        const result = await query(args);
 
         // ── 3. Index de recherche ───────────────────────────────────────────
         // Chargé paresseusement : search.js importe ce module, un require en

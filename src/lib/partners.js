@@ -76,7 +76,13 @@ function coreSlug(slug) {
 
 /** Métier deviné à partir du libellé d'origine, pour préremplir `specialty`. */
 function guessSpecialty(name) {
-  const n = String(name || '').toLowerCase();
+  // Les accents doivent tomber AVANT la comparaison : « Mécanicien » ne
+  // contient pas « mecan ». Sans cette normalisation, la moitié des métiers
+  // français passait à travers.
+  const n = String(name || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase();
   const map = [
     ['soud', 'Soudure'],
     ['peint', 'Peinture'],
@@ -89,7 +95,6 @@ function guessSpecialty(name) {
     ['plastic', 'Plasturgie'],
     ['minuteur', 'Clés'],
     ['piece', 'Pièces détachées'],
-    ['pièce', 'Pièces détachées'],
   ];
   for (const [needle, label] of map) if (n.includes(needle)) return label;
   return null;

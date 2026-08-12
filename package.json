@@ -15,7 +15,9 @@
     "prisma:migrate:baseline": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/0_init/migration.sql",
     "prisma:db:pull": "prisma db pull",
     "seed": "node prisma/seed.js",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "test": "node --test \"test/*.test.js\"",
+    "test:watch": "node --test --watch \"test/*.test.js\""
   },
   "prisma": {
     "seed": "node prisma/seed.js"
