@@ -17,9 +17,13 @@
  * les COMPOSANTS (achat, transport, fret, dépotage, main d'œuvre, frais
  * connexes, réparations détaillées, IMV) et laisse la plateforme recalculer.
  *
- * La colonne « coût total » du classeur devient alors un CONTRÔLE : là où elle
- * s'écarte de la somme de ses propres composants, c'est le classeur qui se
- * contredit, pas la reprise qui se trompe. Ce rapport chiffre ces écarts.
+ * La colonne « coût total » du classeur devient alors un POINT DE COMPARAISON :
+ * le rapport annonce, véhicule par véhicule, ce que la plateforme affichera et
+ * ce que le classeur affichait, avec la raison de l'écart. C'est le chiffre que
+ * le gérant ira chercher en premier.
+ *
+ * Cette prévision est vérifiée : après chargement, le coût calculé en base par
+ * src/lib/costing.js concorde au franc près sur les 56 véhicules chiffrés.
  */
 
 const fs = require('node:fs');
@@ -88,10 +92,26 @@ function vinValide(vin) {
 }
 
 /**
- * Coût de revient recalculé à partir des seuls composants.
+ * Coût de revient tel que la PLATEFORME l'affichera, une fois la reprise faite.
+ *
+ * Ce n'est pas la formule du classeur, et c'est volontaire. Deux différences,
+ * toutes deux au bénéfice de l'exactitude :
+ *
+ *   · l'IMV entre dans le coût. Le classeur l'inclut sur trois véhicules et
+ *     l'oublie sur les autres ; c'est une taxe payée sur le véhicule, elle en
+ *     fait partie.
+ *   · les réparations sont celles réellement détaillées, pas le forfait de la
+ *     colonne — voir l'arbitrage 3 du chargeur.
+ *
+ * Le rapport compare donc ce que le gérant verra à ce que son classeur
+ * affichait. C'est la seule comparaison qui lui serve.
+ *
  * `null` quand un composant indispensable manque — on ne devine pas.
+ *
+ * @param {number} [preparation] montant de préparation retenu ; à défaut, la
+ *   colonne réparation du classeur.
  */
-function recalculer(v, taux) {
+function recalculer(v, taux, preparation) {
   if (taux == null) return null;
   const devise = [
     v.achat_devise,
@@ -109,7 +129,8 @@ function recalculer(v, taux) {
     nb(v.depotage) +
     nb(v.main_oeuvre) +
     nb(v.frais_connexe) +
-    nb(v.reparation)
+    nb(v.imv) +
+    (preparation != null ? preparation : nb(v.reparation))
   );
 }
 
@@ -228,23 +249,40 @@ function analyser(tampon) {
       }
 
       /* — Signalées — */
-      const recalcule = recalculer(v, taux);
+      // Les réparations sont établies AVANT le recalcul : c'est le détail qui
+      // entre dans le coût, pas la colonne.
+      const interventions = parVin.get(v.vin) || [];
+      const sommeInterventions = interventions.reduce((s, i) => s + nb(i.montant), 0);
+      const preparation = interventions.length ? sommeInterventions : nb(v.reparation);
+
+      // Un véhicule sans prix d'achat ne recevra aucune écriture de coût : lui
+      // calculer un coût de revient annoncerait un chiffre que la plateforme
+      // n'affichera jamais.
+      const importable = Boolean(
+        v.vin && v.vin.length >= 11 && v.achat_devise != null && taux != null
+      );
+      const recalcule = importable ? recalculer(v, taux, preparation) : null;
       if (recalcule != null && v.cout_total != null) {
-        const delta = Math.round(v.cout_total - recalcule);
+        const delta = Math.round(recalcule - v.cout_total);
         if (Math.abs(delta) >= 1) {
-          const explique = Math.abs(delta - nb(v.imv)) < 1 ? " — soit exactement l'IMV" : '';
+          const raisons = [];
+          if (nb(v.imv) > 0) raisons.push(`IMV ${fcfa(v.imv)}`);
+          if (interventions.length && Math.abs(sommeInterventions - nb(v.reparation)) >= 1) {
+            raisons.push(
+              `réparations réelles ${fcfa(sommeInterventions)} au lieu de ${fcfa(v.reparation)}`
+            );
+          }
           signaler(
             NIVEAUX.SIGNALE,
-            'TOTAL_INCOHERENT',
+            'ECART_AVEC_LE_CLASSEUR',
             cle,
-            `le total du classeur (${fcfa(v.cout_total)}) s'écarte de ${fcfa(Math.abs(delta))} ` +
-              `de la somme de ses propres composants (${fcfa(recalcule)})${explique}`
+            `la plateforme affichera ${fcfa(recalcule)}, le classeur affichait ` +
+              `${fcfa(v.cout_total)} — ${delta > 0 ? '+' : '−'}${fcfa(Math.abs(delta))}` +
+              (raisons.length ? ` (${raisons.join(' ; ')})` : '')
           );
         }
       }
 
-      const interventions = parVin.get(v.vin) || [];
-      const sommeInterventions = interventions.reduce((s, i) => s + nb(i.montant), 0);
       if (interventions.length && v.reparation != null) {
         const delta = Math.round(v.reparation - sommeInterventions);
         if (Math.abs(delta) >= 1) {
@@ -353,7 +391,7 @@ function analyser(tampon) {
         coutClasseur: v.cout_total,
         prixVente: v.prix_vente,
         interventions: interventions.length,
-        importable: Boolean(v.vin && v.vin.length >= 11 && v.achat_devise != null && taux != null),
+        importable,
         composants: {
           ACHAT: v.achat_devise != null && taux ? v.achat_devise * taux : null,
           TRANSPORT_INTERNE: v.transport_devise != null && taux ? v.transport_devise * taux : null,

@@ -26,10 +26,25 @@ test('le coût est la somme de ses composants, jamais le total du classeur', () 
     depotage: 168750,
     main_oeuvre: 25500,
     frais_connexe: 2000,
+    imv: 78600,
     reparation: 622500,
     cout_total: 999999999, // volontairement faux
   };
-  assert.equal(recalculer(v, 580), 4739840);
+  // 4 739 840 F est ce qu'affichait le classeur — il n'y comptait pas l'IMV.
+  // La plateforme l'y compte : c'est une taxe payée sur ce véhicule.
+  assert.equal(recalculer(v, 580), 4818440);
+});
+
+test('l’IMV entre dans le coût, même quand le classeur l’oubliait', () => {
+  const base = { achat_devise: 1000, depotage: 0 };
+  assert.equal(recalculer(base, 600), 600000);
+  assert.equal(recalculer({ ...base, imv: 78600 }, 600), 678600);
+});
+
+test('ce sont les réparations réelles qui comptent, pas la colonne', () => {
+  const v = { achat_devise: 1000, reparation: 670000 };
+  assert.equal(recalculer(v, 600), 1270000, 'sans détail, la colonne fait foi');
+  assert.equal(recalculer(v, 600, 200000), 800000, 'avec détail, le détail fait foi');
 });
 
 test('la commission entre dans le coût', () => {

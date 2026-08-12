@@ -500,9 +500,13 @@ async function main() {
     console.error('  à une société, et le filtre société refuse toute écriture hors contexte.');
     process.exit(1);
   }
-  const societe = await runAsSystem(null, () =>
-    prisma.company.findFirst({ where: { id: opts.companyId } })
-  );
+  // Le `await` doit être DANS le contexte : une requête Prisma est paresseuse,
+  // elle ne s'exécute qu'au moment où on l'attend. Renvoyer la promesse pour
+  // l'attendre dehors la fait partir hors périmètre, et le filtre société la
+  // refuse — ce qu'il a fait.
+  const societe = await runAsSystem(null, async () => {
+    return prisma.company.findFirst({ where: { id: opts.companyId } });
+  });
   if (!societe) {
     console.error(`\n  Société ${opts.companyId} introuvable.`);
     process.exit(1);
