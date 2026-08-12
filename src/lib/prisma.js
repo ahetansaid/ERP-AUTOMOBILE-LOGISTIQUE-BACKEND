@@ -20,6 +20,9 @@
 
 const { PrismaClient, Prisma } = require('@prisma/client');
 const { getContext } = require('./context');
+const { logger } = require('./logger');
+
+const log = logger('prisma');
 
 const logLevels =
   process.env.NODE_ENV === 'development'
@@ -103,7 +106,12 @@ function writeAudit(entry) {
   base.auditLog
     .create({ data: entry })
     .catch((err) =>
-      console.error('[audit]', err.message, entry.resource, entry.resourceId)
+      // Un audit perdu est une trace perdue : jamais silencieux.
+      log.error("écriture du journal d'audit impossible", {
+        err,
+        resource: entry.resource,
+        resourceId: entry.resourceId,
+      })
     );
 }
 
@@ -203,7 +211,7 @@ const prisma = base.$extends({
               }
             }
           } catch (err) {
-            console.error('[search.hook]', err.message);
+            log.warn('indexation ignorée', { err, model });
           }
         }
 

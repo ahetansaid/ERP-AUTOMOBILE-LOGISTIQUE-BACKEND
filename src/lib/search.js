@@ -18,6 +18,9 @@
 
 const { prisma, prismaRaw } = require('./prisma');
 const { getContext } = require('./context');
+const { logger } = require('./logger');
+
+const log = logger('search');
 
 const clean = (v) =>
   v == null ? null : String(v).trim().replace(/\s+/g, ' ').slice(0, 255) || null;
@@ -159,7 +162,7 @@ async function reindex(model, entityId, companyId) {
       update: data,
     });
   } catch (err) {
-    console.error('[search.reindex]', model, entityId, err.message);
+    log.error('indexation impossible', { err, model, entityId });
   }
 }
 
@@ -171,7 +174,7 @@ async function unindex(model, entityId, companyId) {
       where: { companyId: Number(companyId), entityType: model, entityId: Number(entityId) },
     });
   } catch (err) {
-    console.error('[search.unindex]', model, entityId, err.message);
+    log.error('désindexation impossible', { err, model, entityId });
   }
 }
 

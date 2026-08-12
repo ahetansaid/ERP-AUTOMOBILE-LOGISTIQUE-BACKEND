@@ -1,0 +1,74 @@
+# Intégration continue — backend
+#
+# Objectif : qu'aucune régression ne franchisse une pull request sans être vue.
+# Aucune base n'est nécessaire — les tests portent sur les fonctions pures et
+# sur les garde-fous, qui se déclenchent avant toute requête.
+
+name: CI
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  verifier:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # `npm ci` déclenche le postinstall, donc `prisma generate` : le client
+      # est disponible pour les tests sans étape supplémentaire.
+      - name: Installer les dépendances
+        run: npm ci
+        env:
+          # Prisma exige la variable pour générer, même sans se connecter.
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+
+      - name: Valider le schéma Prisma
+        run: npx prisma validate
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+
+      - name: Vérifier la syntaxe
+        run: |
+          for f in $(find src -name '*.js'); do node --check "$f" || exit 1; done
+
+      - name: Tests
+        run: npm test
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+          # Secrets factices : le module d'authentification refuse de démarrer
+          # en production avec des secrets faibles, ce qui est le comportement
+          # voulu. En CI on reste en environnement de test.
+          NODE_ENV: test
+          JWT_SECRET: ci-secret-de-test-suffisamment-long-pour-passer
+          JWT_REFRESH_SECRET: ci-refresh-de-test-suffisamment-long-pour-passer
+
+      - name: Démarrage de l'application
+        run: node -e "require('./src/index.js'); console.log('boot ok')"
+        env:
+          VERCEL: '1' # évite app.listen
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+          NODE_ENV: test
+          JWT_SECRET: ci-secret-de-test-suffisamment-long-pour-passer
+          JWT_REFRESH_SECRET: ci-refresh-de-test-suffisamment-long-pour-passer
+
+      # Les migrations ajoutent des valeurs d'énumération, que PostgreSQL
+      # interdit d'utiliser dans la transaction qui les crée. Ce contrôle
+      # rappelle qu'elles se jouent séparément.
+      - name: Contrôler l'ordre des migrations
+        run: |
+          echo "Migrations présentes :"
+          ls prisma/migrations | grep -v migration_lock

@@ -32,6 +32,9 @@ const { authMiddleware } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
 const { withContext } = require('./lib/context');
+const { logger } = require('./lib/logger');
+
+const log = logger('http');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -120,9 +123,21 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
+// Dernier filet. L'identifiant de corrélation est renvoyé au client : c'est ce
+// qui permet, à partir d'une capture d'écran, de retrouver la requête, ses
+// écritures et son journal d'audit — tous portent le même identifiant.
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  log.error('requête en échec', {
+    err,
+    method: req.method,
+    path: req.originalUrl,
+    userId: req.user?.id ?? null,
+  });
+  res.status(500).json({
+    message: 'Erreur serveur',
+    statusCode: 500,
+    correlationId: req.correlationId ?? null,
+  });
 });
 
 // En environnement serverless (Vercel), l'app est importée par api/index.js
@@ -131,7 +146,7 @@ app.use((err, req, res, next) => {
 // classique type Railway/Render.
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
-    console.log('Serveur ParcAuto Manager sur le port', PORT);
+    log.info('serveur démarré', { port: PORT, env: process.env.NODE_ENV ?? 'development' });
   });
 }
 

@@ -22,6 +22,9 @@
 const { prisma } = require('../lib/prisma');
 const { postEntry, reverseEntry } = require('../lib/ledger');
 const { findOrCreatePartner } = require('../lib/partners');
+const { logger } = require('../lib/logger');
+
+const log = logger('ledger-bridge');
 
 /** Compte de caisse par défaut de la société courante, ou null. */
 async function defaultCashAccount() {
@@ -51,7 +54,9 @@ async function safePost(params, tag) {
   try {
     return await postEntry(params);
   } catch (err) {
-    console.error(`[ledgerBridge.${tag}]`, err.message);
+    // Silencieux pour le flux métier, mais jamais pour l'exploitant : c'est
+    // pendant la double écriture que les divergences se créent.
+    log.error('écriture au grand livre refusée', { err, hook: tag, params });
     return null;
   }
 }
@@ -100,7 +105,9 @@ async function onReceiptWorkshopQuote({ receiptId, workshopQuoteId, vehicleId, a
   if (vehicleId == null) {
     // Sans véhicule, la dépense d'atelier serait perdue pour le coût de
     // revient — exactement le défaut relevé dans les classeurs.
-    console.error('[ledgerBridge.receiptWorkshopQuote] devis sans véhicule, écriture ignorée');
+    log.warn('devis sans véhicule : dépense exclue du coût de revient', {
+      receiptId, workshopQuoteId,
+    });
     return null;
   }
 
@@ -127,7 +134,7 @@ async function onReceiptWorkshopQuote({ receiptId, workshopQuoteId, vehicleId, a
           data: { partnerId },
         });
       } catch (err) {
-        console.error('[ledgerBridge.partner]', err.message);
+        log.warn('rattachement du prestataire impossible', { err, prestataire });
       }
     }
   }
@@ -208,7 +215,7 @@ async function onTransportFees({ vehicleId, amount, transactionDate }) {
       categoryId: await categoryFor('LOGISTIQUE'),
     });
   } catch (err) {
-    console.error('[ledgerBridge.transportFees]', err.message);
+    log.error('frais de transport non enregistrés', { err, vehicleId });
     return null;
   }
 }

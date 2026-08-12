@@ -20,6 +20,9 @@ const { prisma } = require('./prisma');
 const { getContext } = require('./context');
 const { RULES, RULE_CODES } = require('./alertRules');
 const { notify } = require('../services/notifications');
+const { logger } = require('./logger');
+
+const log = logger('alerts');
 
 /** Installe les règles par défaut pour la société courante. Idempotent. */
 async function ensureRules() {
@@ -53,7 +56,7 @@ function rappelDu(event, reminderDays) {
 async function runRule(rule) {
   const spec = RULES[rule.code];
   if (!spec) {
-    console.error('[alerts] règle inconnue, ignorée :', rule.code);
+    log.warn('règle inconnue, ignorée', { code: rule.code });
     return { ouvertes: 0, maintenues: 0, resolues: 0 };
   }
 
@@ -62,7 +65,7 @@ async function runRule(rule) {
     constats = (await spec.run(rule.params || {})) || [];
   } catch (err) {
     // Une règle qui échoue ne doit pas empêcher les autres de tourner.
-    console.error('[alerts.run]', rule.code, err.message);
+    log.error("évaluation d'une règle échouée", { err, code: rule.code });
     return { ouvertes: 0, maintenues: 0, resolues: 0 };
   }
 
@@ -153,7 +156,7 @@ async function diffuser(rule, event) {
       audience: (rule.targetRoles || []).length ? 'admins' : undefined,
     });
   } catch (err) {
-    console.error('[alerts.diffuser]', err.message);
+    log.warn("diffusion de l'alerte impossible", { err, code: rule.code });
   }
 }
 
