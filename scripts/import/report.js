@@ -363,8 +363,16 @@ function analyser(tampon) {
           MAIN_OEUVRE: v.main_oeuvre,
           FRAIS_CONNEXE: v.frais_connexe,
           IMV: v.imv,
-          PREPARATION: sommeInterventions || null,
         },
+        // La préparation ne suit pas le sort des autres composants : elle est
+        // reprise même quand le prix d'achat manque. Ce qu'on sait avoir
+        // dépensé en atelier ne se perd pas parce qu'on ignore le prix d'achat.
+        // Sans détail, la colonne est reprise en une écriture unique.
+        preparation: interventions.length
+          ? { lignes: interventions.length, montant: sommeInterventions }
+          : nb(v.reparation) > 0
+            ? { lignes: 1, montant: v.reparation }
+            : { lignes: 0, montant: 0 },
       });
     }
   }
@@ -646,15 +654,22 @@ function rendre({ anomalies, vehicules, vus }, tiers, pieces, tampon) {
   /* Projection */
   titre('7. CE QUE LA REPRISE ÉCRIRA');
   const parNature = {};
+  const ajouter = (type, lignes, montant) => {
+    if (!montant) return;
+    parNature[type] = parNature[type] || { lignes: 0, montant: 0 };
+    parNature[type].lignes += lignes;
+    parNature[type].montant += montant;
+  };
   for (const v of importables) {
-    for (const [type, montant] of Object.entries(v.composants)) {
-      if (!montant) continue;
-      parNature[type] = parNature[type] || { lignes: 0, montant: 0 };
-      parNature[type].lignes += 1;
-      parNature[type].montant += montant;
-    }
+    for (const [type, montant] of Object.entries(v.composants)) ajouter(type, 1, montant);
   }
-  console.log(`  ${importables.length} véhicules, et pour chacun ses composants de coût :\n`);
+  // La préparation est reprise sur TOUS les véhicules, y compris ceux dont le
+  // prix d'achat manque — et à raison d'une écriture par intervention, ce qui
+  // conserve le prestataire et le motif. Cette projection est donc exactement
+  // ce que le chargeur écrira.
+  for (const v of vehicules) ajouter('PREPARATION', v.preparation.lignes, v.preparation.montant);
+
+  console.log(`  ${importables.length} véhicules chiffrés sur ${vehicules.length} repris :\n`);
   let cumul = 0;
   for (const [type, v] of Object.entries(parNature).sort((a, b) => b[1].montant - a[1].montant)) {
     cumul += v.montant;
