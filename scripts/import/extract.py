@@ -11,9 +11,21 @@ avant qu'une seule ligne ne parte en production.
 
     python scripts/import/extract.py "D:/Documents/Park auto" scripts/import/tampon.json
 
-Les classeurs ne sont pas structurellement identiques : le bloc « réparation »
-commence en colonne N sur certaines feuilles, O sur d'autres, et une feuille n'a
-pas de bloc de répartition du tout. L'extraction s'adapte plutôt que de supposer.
+LES COLONNES NE SONT PAS AUX MÊMES ENDROITS D'UNE FEUILLE À L'AUTRE.
+
+Une première version lisait des positions fixes. Elle se trompait sur six
+feuilles sur quinze :
+
+  · HLCUBSC260226117 intercale « Com USD » entre l'achat et le transport, et
+    décale tout le bloc de répartition d'une colonne — le « coût total » lu
+    était en réalité l'IMV, ce qui produisait des totaux à 48 000 F ;
+  · HLCUBSC260405510 et HLCUMTR260526189 placent « Com USD » APRÈS le fret ;
+  · HLCUMTR260431552 n'a pas de colonne de transport du tout ;
+  · MEDURS330427 la nomme « Fr TR USD ».
+
+Chaque bloc est donc localisé par sa ligne d'en-tête, et chaque colonne par son
+libellé. Une colonne absente donne une valeur nulle — jamais la valeur de la
+colonne voisine.
 """
 
 import io
@@ -48,14 +60,165 @@ def sans_accent(s):
     )
 
 
-def trouver(ws, motif, colonne_max=None):
-    """Localise la première cellule dont le texte contient le motif."""
-    m = motif.upper()
-    for row in ws.iter_rows(max_row=ws.max_row, max_col=colonne_max or ws.max_column):
-        for c in row:
-            if isinstance(c.value, str) and m in sans_accent(c.value).upper():
-                return c
+def norm(s):
+    """Libellé comparable : sans accent, majuscules, espaces resserrés."""
+    return re.sub(r"\s+", " ", sans_accent(s).upper()).strip()
+
+
+def est_vin(v):
+    s = txt(v)
+    return s if s and len(s) >= 10 else None
+
+
+# ── Repérage des blocs ──────────────────────────────────────────────────────
+
+# Chaque feuille contient trois tableaux empilés, tous introduits par une ligne
+# d'en-tête où la quatrième colonne s'appelle « VIN ».
+def lignes_entete(ws):
+    lignes = []
+    for r in range(1, min(ws.max_row, 60) + 1):
+        for c in ws[r]:
+            if isinstance(c.value, str) and norm(c.value) in ("VIN", "CHASSIS", "N CHASSIS"):
+                lignes.append(r)
+                break
+    return lignes
+
+
+def entetes(ws, ligne):
+    """{numéro de colonne: libellé normalisé} pour une ligne d'en-tête."""
+    return {
+        c.column: norm(c.value)
+        for c in ws[ligne]
+        if isinstance(c.value, str) and c.value.strip()
+    }
+
+
+def colonne(entetes_bloc, motif):
+    """Numéro de la colonne dont le libellé correspond, ou None."""
+    for col, libelle in sorted(entetes_bloc.items()):
+        if re.search(motif, libelle):
+            return col
     return None
+
+
+def lire_lignes(ws, entete, col_vin, max_lignes=12):
+    """Lignes de données sous un en-tête, jusqu'à épuisement des châssis."""
+    lignes = []
+    vides = 0
+    for r in range(entete + 1, min(entete + 1 + max_lignes, ws.max_row + 1)):
+        vin = est_vin(ws.cell(row=r, column=col_vin).value)
+        if not vin:
+            vides += 1
+            if vides >= 2:
+                break
+            continue
+        vides = 0
+        lignes.append((r, vin))
+    return lignes
+
+
+def taux_dans_formule(wsf, ligne, col):
+    """
+    Le taux de change vit dans la formule, pas dans une cellule dédiée.
+    C'est ce qui a permis de démontrer que deux blocs d'une même feuille
+    convertissent parfois le même véhicule à deux taux différents.
+    """
+    if not col:
+        return None
+    f = wsf.cell(row=ligne, column=col).value
+    if isinstance(f, str) and f.startswith("="):
+        t = re.findall(r"\*\s*(\d{3,4})", f)
+        if t:
+            return int(t[0])
+    return None
+
+
+# ── Les trois blocs ─────────────────────────────────────────────────────────
+
+
+def bloc_frais(ws, wsf, entete):
+    """
+    Bloc du haut : achat, transport interne, fret et commission en devise.
+
+    Le nombre de composants varie selon la feuille — c'est pourquoi ils sont
+    cherchés par libellé. « Fret » est testé avant « TR » : la feuille
+    MEDURS330427 nomme sa colonne « Fr TR USD », et un test trop large sur
+    « FR » la classerait en fret.
+    """
+    e = entetes(ws, entete)
+    col_vin = colonne(e, r"^(VIN|CHASSIS|N CHASSIS)$")
+    cols = {
+        "achat_devise": colonne(e, r"\bACHAT\b"),
+        "fret_devise": colonne(e, r"\bFRET\b"),
+        "transport_devise": colonne(e, r"\bTR\b|\bTRANSPORT\b"),
+        "commission_devise": colonne(e, r"\bCOM\b|\bCOMMISSION\b"),
+    }
+    col_total = colonne(e, r"COUT LOGISTIQUE")
+    col_veh = colonne(e, r"VEHICULE")
+    col_annee = colonne(e, r"ANNEE")
+
+    lignes = []
+    for r, vin in lire_lignes(ws, entete, col_vin):
+        ligne = {
+            "ligne": r,
+            "vehicule": txt(ws.cell(row=r, column=col_veh).value) if col_veh else None,
+            "annee": ws.cell(row=r, column=col_annee).value if col_annee else None,
+            "vin": vin,
+            "taux_bloc_cout": taux_dans_formule(wsf, r, col_total),
+        }
+        for champ, col in cols.items():
+            ligne[champ] = nombre(ws.cell(row=r, column=col).value) if col else None
+        lignes.append(ligne)
+    return lignes
+
+
+def bloc_manutention(ws, entete):
+    """Bloc du milieu : dépotage, main d'œuvre, frais connexes — déjà en FCFA."""
+    e = entetes(ws, entete)
+    col_vin = colonne(e, r"^(VIN|CHASSIS|N CHASSIS)$")
+    cols = {
+        "depotage": colonne(e, r"DEPOTAGE"),
+        "main_oeuvre": colonne(e, r"\bMAIN\b"),
+        "frais_connexe": colonne(e, r"CONNEXE"),
+    }
+    par_vin = {}
+    for r, vin in lire_lignes(ws, entete, col_vin):
+        par_vin[vin] = {
+            champ: (nombre(ws.cell(row=r, column=col).value) if col else None)
+            for champ, col in cols.items()
+        }
+    return par_vin
+
+
+def bloc_repartition(ws, wsf, entete):
+    """
+    Bloc du bas : c'est lui qui a alimenté les coûts utilisés jusqu'ici.
+
+    On en retient le coût total, le prix de vente et le TAUX, qui diffère
+    parfois de celui du bloc du haut — l'incohérence à signaler.
+    """
+    e = entetes(ws, entete)
+    col_vin = colonne(e, r"^(VIN|CHASSIS|N CHASSIS)$")
+    cols = {
+        "cout_total": colonne(e, r"COUT TOTAL"),
+        "reparation": colonne(e, r"REPARATION"),
+        "imv": colonne(e, r"\bIMV\b"),
+        "prix_vente": colonne(e, r"PRIX DE VENTE"),
+        "marge_classeur": colonne(e, r"\bMARGE\b"),
+        "manutention_repartie": colonne(e, r"MANUTENTION"),
+        "logistique_repartie": colonne(e, r"LOGISTIQUE"),
+    }
+    col_achat = colonne(e, r"ACHAT")
+
+    par_vin = {}
+    for r, vin in lire_lignes(ws, entete, col_vin):
+        d = {
+            champ: (nombre(ws.cell(row=r, column=col).value) if col else None)
+            for champ, col in cols.items()
+        }
+        d["taux_bloc_repartition"] = taux_dans_formule(wsf, r, col_achat)
+        par_vin[vin] = d
+    return par_vin
 
 
 def extraire_conteneur(ws):
@@ -71,86 +234,6 @@ def extraire_conteneur(ws):
     return {"reference": ref or None, "date": date}
 
 
-def extraire_frais(ws, wf):
-    """
-    Bloc du haut : prix d'achat, transport interne et fret en devise, avec le
-    taux appliqué. Le taux est lu DANS la formule — c'est là qu'il vit, et c'est
-    ce qui a permis de démontrer les incohérences.
-    """
-    lignes = []
-    for r in range(3, 9):
-        vin = txt(ws.cell(row=r, column=4).value)
-        if not vin or len(vin) < 10:
-            continue
-        formule = wf.cell(row=r, column=8).value
-        taux = None
-        if isinstance(formule, str) and formule.startswith("="):
-            t = re.findall(r"\*\s*(\d{3,4})", formule)
-            if t:
-                taux = int(t[0])
-        lignes.append(
-            {
-                "ligne": r,
-                "vehicule": txt(ws.cell(row=r, column=2).value),
-                "annee": ws.cell(row=r, column=3).value,
-                "vin": vin,
-                "achat_devise": nombre(ws.cell(row=r, column=5).value),
-                "transport_devise": nombre(ws.cell(row=r, column=6).value),
-                "fret_devise": nombre(ws.cell(row=r, column=7).value),
-                "taux_bloc_cout": taux,
-            }
-        )
-    return lignes
-
-
-def extraire_manutention(ws):
-    """Bloc du milieu : dépotage, main d'œuvre et frais connexes, déjà en FCFA."""
-    ancre = trouver(ws, "DETAIL FRAIS MANUTENTION", colonne_max=4)
-    if not ancre:
-        return {}
-    par_vin = {}
-    for r in range(ancre.row + 2, ancre.row + 10):
-        vin = txt(ws.cell(row=r, column=4).value)
-        if not vin or len(vin) < 10:
-            continue
-        par_vin[vin] = {
-            "depotage": nombre(ws.cell(row=r, column=5).value),
-            "main_oeuvre": nombre(ws.cell(row=r, column=6).value),
-            "frais_connexe": nombre(ws.cell(row=r, column=7).value),
-        }
-    return par_vin
-
-
-def extraire_repartition(ws, wf):
-    """
-    Bloc du bas : c'est lui qui a alimenté les coûts utilisés jusqu'ici. On en
-    retient le coût total, le prix de vente et le TAUX, qui diffère parfois de
-    celui du bloc du haut — l'incohérence à signaler.
-    """
-    ancre = trouver(ws, "partition des couts", colonne_max=4)
-    if not ancre:
-        return {}
-    par_vin = {}
-    for r in range(ancre.row + 2, ancre.row + 10):
-        vin = txt(ws.cell(row=r, column=4).value)
-        if not vin or len(vin) < 10:
-            continue
-        taux = None
-        f = wf.cell(row=r, column=5).value
-        if isinstance(f, str) and f.startswith("="):
-            t = re.findall(r"\*\s*(\d{3,4})", f)
-            if t:
-                taux = int(t[0])
-        par_vin[vin] = {
-            "cout_total": nombre(ws.cell(row=r, column=10).value),
-            "reparation": nombre(ws.cell(row=r, column=8).value),
-            "imv": nombre(ws.cell(row=r, column=9).value),
-            "prix_vente": nombre(ws.cell(row=r, column=12).value),
-            "taux_bloc_repartition": taux,
-        }
-    return par_vin
-
-
 def extraire_interventions(ws):
     """
     Bloc « RÉPARATION & MAINTENANCE ». Sa colonne de départ varie selon les
@@ -159,9 +242,17 @@ def extraire_interventions(ws):
     # On vise « MAINTENANCE » et non « RÉPARATION » : ce dernier mot apparaît
     # aussi en en-tête de colonne du bloc de répartition, plus haut dans la
     # feuille, et l'ancre tombait dessus.
-    ancre = trouver(ws, "MAINTENANCE")
+    ancre = None
+    for row in ws.iter_rows(max_row=ws.max_row):
+        for c in row:
+            if isinstance(c.value, str) and "MAINTENANCE" in norm(c.value):
+                ancre = c
+                break
+        if ancre:
+            break
     if not ancre:
         return []
+
     c_veh, c_desc, c_presta, c_cout = (
         ancre.column,
         ancre.column + 3,
@@ -175,14 +266,14 @@ def extraire_interventions(ws):
         libelle = txt(ws.cell(row=r, column=c_veh).value)
         if libelle and "ous-total" not in libelle:
             veh_courant = libelle
-            chassis = txt(ws.cell(row=r, column=c_veh + 2).value)
-            if chassis and len(chassis) >= 10:
+            chassis = est_vin(ws.cell(row=r, column=c_veh + 2).value)
+            if chassis:
                 vin_courant = chassis
         montant = nombre(ws.cell(row=r, column=c_cout).value)
         presta = txt(ws.cell(row=r, column=c_presta).value)
         if montant and presta and libelle != "Sous-total":
             atelier = None
-            u = sans_accent(presta).upper()
+            u = norm(presta)
             if "EURO" in u:
                 atelier = "EURO"
             elif "USA" in u:
@@ -226,6 +317,62 @@ def extraire_pieces(chemin):
     return par_feuille
 
 
+def extraire_feuille(ws, wsf):
+    """
+    Les trois blocs d'une feuille, reconnus par ce qu'ils contiennent et non
+    par leur rang : une feuille peut n'avoir aucun bloc de répartition.
+    """
+    entete_frais = entete_manut = entete_repart = None
+    for ligne in lignes_entete(ws):
+        e = entetes(ws, ligne)
+        libelles = " | ".join(e.values())
+        if "DEPOTAGE" in libelles:
+            entete_manut = ligne
+        elif "COUT TOTAL" in libelles:
+            entete_repart = ligne
+        elif entete_frais is None:
+            entete_frais = ligne
+
+    if entete_frais is None:
+        return None
+
+    frais = bloc_frais(ws, wsf, entete_frais)
+    if not frais:
+        return None
+    manut = bloc_manutention(ws, entete_manut) if entete_manut else {}
+    repart = bloc_repartition(ws, wsf, entete_repart) if entete_repart else {}
+    interventions = extraire_interventions(ws)
+
+    vehicules = []
+    for f in frais:
+        vin = f["vin"]
+        vehicules.append(
+            {
+                **f,
+                **manut.get(vin, {}),
+                **repart.get(vin, {}),
+                # L'atelier est déduit des interventions du véhicule : il est
+                # porté par le véhicule, pas par le nom du prestataire.
+                "atelier": next(
+                    (i["atelier"] for i in interventions if i["vin"] == vin and i["atelier"]),
+                    None,
+                ),
+            }
+        )
+
+    return {
+        "feuille": ws.title,
+        **extraire_conteneur(ws),
+        "blocs": {
+            "frais": entete_frais,
+            "manutention": entete_manut,
+            "repartition": entete_repart,
+        },
+        "vehicules": vehicules,
+        "interventions": interventions,
+    }
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
@@ -241,45 +388,17 @@ def main():
     wf = openpyxl.load_workbook(costing, data_only=False)
 
     conteneurs = []
+    ignorees = []
     for ws in wv.worksheets:
-        wsf = wf[ws.title]
-        frais = extraire_frais(ws, wsf)
-        if not frais:
-            continue
-        manut = extraire_manutention(ws)
-        repart = extraire_repartition(ws, wsf)
-        interventions = extraire_interventions(ws)
-
-        vehicules = []
-        for f in frais:
-            vin = f["vin"]
-            r = repart.get(vin, {})
-            m = manut.get(vin, {})
-            vehicules.append(
-                {
-                    **f,
-                    **m,
-                    **r,
-                    # L'atelier est déduit des interventions du véhicule : il est
-                    # porté par le véhicule, pas par le nom du prestataire.
-                    "atelier": next(
-                        (i["atelier"] for i in interventions if i["vin"] == vin and i["atelier"]),
-                        None,
-                    ),
-                }
-            )
-
-        conteneurs.append(
-            {
-                "feuille": ws.title,
-                **extraire_conteneur(ws),
-                "vehicules": vehicules,
-                "interventions": interventions,
-            }
-        )
+        feuille = extraire_feuille(ws, wf[ws.title])
+        if feuille:
+            conteneurs.append(feuille)
+        else:
+            ignorees.append(ws.title)
 
     tampon = {
         "source": str(costing),
+        "feuilles_ignorees": ignorees,
         "conteneurs": conteneurs,
         "pieces_detachees": extraire_pieces(pieces),
     }
@@ -291,9 +410,14 @@ def main():
 
     nb_veh = sum(len(c["vehicules"]) for c in conteneurs)
     nb_int = sum(len(c["interventions"]) for c in conteneurs)
-    print(f"Zone tampon écrite : {sortie}")
-    print(f"  {len(conteneurs)} conteneurs · {nb_veh} véhicules · {nb_int} interventions")
-    print(f"  {len(tampon['pieces_detachees'])} feuilles de pièces détachées")
+    sans_repart = [c["feuille"] for c in conteneurs if not c["blocs"]["repartition"]]
+    print(f"Zone tampon ecrite : {sortie}")
+    print(f"  {len(conteneurs)} conteneurs · {nb_veh} vehicules · {nb_int} interventions")
+    print(f"  {len(tampon['pieces_detachees'])} feuilles de pieces detachees")
+    if sans_repart:
+        print(f"  sans bloc de repartition : {', '.join(sans_repart)}")
+    if ignorees:
+        print(f"  feuilles ignorees : {', '.join(ignorees)}")
 
 
 if __name__ == "__main__":
