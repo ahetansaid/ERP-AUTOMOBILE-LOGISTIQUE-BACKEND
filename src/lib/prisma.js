@@ -48,6 +48,20 @@ const TENANT_MODELS = new Set(
     .map((m) => m.name)
 );
 
+/**
+ * Modèles dont la clé de société est leur PROPRE identifiant, pas une colonne
+ * `companyId`. `Company` est le seul cas — et il échappait donc à la détection
+ * automatique, laissant `prisma.company.findFirst()` renvoyer la première
+ * société de la base, toutes entreprises confondues.
+ *
+ * On les filtre sur `id` au lieu de `companyId`.
+ */
+const TENANT_BY_ID_MODELS = new Set(['Company']);
+const ALL_TENANT_MODELS = new Set([...TENANT_MODELS, ...TENANT_BY_ID_MODELS]);
+
+/** Champ portant la société pour ce modèle. */
+const tenantField = (model) => (TENANT_BY_ID_MODELS.has(model) ? 'id' : 'companyId');
+
 // Modèles exclus de l'audit : le journal lui-même (récursion) et les tables
 // techniques dont le volume noierait l'information utile.
 const AUDIT_EXCLUDED = new Set([
@@ -121,7 +135,7 @@ const prisma = base.$extends({
     $allModels: {
       async $allOperations({ model, operation, args, query }) {
         const ctx = getContext();
-        const scoped = TENANT_MODELS.has(model) && ctx && !ctx.unscoped;
+        const scoped = ALL_TENANT_MODELS.has(model) && ctx && !ctx.unscoped;
 
         // ── 0. Écriture seule ───────────────────────────────────────────────
         if (APPEND_ONLY_MODELS.has(model) && MUTATING_OPS.has(operation)) {
@@ -132,7 +146,7 @@ const prisma = base.$extends({
         }
 
         // ── 1. Isolation société ────────────────────────────────────────────
-        if (TENANT_MODELS.has(model) && !ctx) {
+        if (ALL_TENANT_MODELS.has(model) && !ctx) {
           // Hors contexte : on refuse plutôt que d'exposer toutes les sociétés.
           // Les scripts doivent passer par runAsSystem() ou prismaRaw.
           throw new Error(
@@ -148,6 +162,7 @@ const prisma = base.$extends({
               `[tenant] ${model}.${operation} sans société associée. Accès refusé.`
             );
           }
+          const champ = tenantField(model);
 
           if (
             READ_OPS.has(operation) ||
@@ -158,8 +173,15 @@ const prisma = base.$extends({
             // une extension ne peut pas changer l'opération exécutée.
             UNIQUE_READ_OPS.has(operation)
           ) {
-            args.where = { ...(args.where || {}), companyId: cid };
+            args.where = { ...(args.where || {}), [champ]: cid };
           } else if (CREATE_OPS.has(operation)) {
+            // La création d'une société n'est pas une opération de tenant :
+            // elle appartient à l'éditeur et passe par prismaRaw.
+            if (TENANT_BY_ID_MODELS.has(model)) {
+              throw new Error(
+                `[tenant] ${model}.${operation} interdit dans un contexte société.`
+              );
+            }
             if (operation === 'createMany') {
               const rows = Array.isArray(args.data) ? args.data : [args.data];
               args.data = rows.map((d) => ({ companyId: cid, ...d }));
@@ -167,8 +189,8 @@ const prisma = base.$extends({
               args.data = { companyId: cid, ...args.data };
             }
           } else if (operation === 'upsert') {
-            args.where = { ...(args.where || {}), companyId: cid };
-            args.create = { companyId: cid, ...args.create };
+            args.where = { ...(args.where || {}), [champ]: cid };
+            args.create = { [champ]: cid, ...args.create };
           }
         }
 
@@ -253,5 +275,6 @@ module.exports = {
   prisma,
   prismaRaw: base,
   disconnect,
-  TENANT_MODELS,
+  TENANT_MODELS: ALL_TENANT_MODELS,
+  TENANT_BY_ID_MODELS,
 };

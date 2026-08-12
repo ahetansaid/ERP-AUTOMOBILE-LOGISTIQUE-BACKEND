@@ -157,7 +157,7 @@ async function allocate(purchaseCostId) {
 
   const creees = [];
   for (const { vehicleId, part } of parts) {
-    const entry = await postEntry({
+    await postEntry({
       nature,
       label: `${libelle} — répartition`,
       // Un frais est une sortie : négatif.
@@ -166,13 +166,13 @@ async function allocate(purchaseCostId) {
       rateApplied: 1,
       entryDate: cost.costDate,
       vehicleId,
+      // Le lien vers le frais d'origine est posé à la création. Le corriger
+      // après coup par un UPDATE serait refusé : la table est en écriture
+      // seule, et le déclencheur PostgreSQL le fait respecter jusque sur les
+      // connexions directes.
+      purchaseCostId: id,
       source: { purchaseId: cost.purchaseId },
     });
-    // postEntry n'expose pas purchaseCostId : on le pose ici pour garder le
-    // lien qui rend la répartition rejouable.
-    await prisma.$executeRaw`
-      UPDATE ledger_entries SET purchase_cost_id = ${id} WHERE id = ${entry.id}
-    `;
     creees.push({ vehicleId, montant: part });
   }
 

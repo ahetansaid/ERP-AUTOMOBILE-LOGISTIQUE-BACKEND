@@ -81,15 +81,27 @@ const ROLE_PERMISSIONS = {
     dashboard: ['read'],
     notifications: ['read', 'update'],
   },
-  // Accès EXTERNE (transitaire, prestataire, client). Volontairement étroit :
-  // ce rôle ne donne accès qu'à ses propres dossiers, jamais au reste de la
-  // société. Le filtrage par tiers est appliqué au-delà de ce contrôle.
+  /**
+   * Accès EXTERNE (transitaire, prestataire, client).
+   *
+   * DÉLIBÉRÉMENT INERTE tant que le filtrage par tiers n'existe pas.
+   *
+   * Une première version accordait `dashboard.read`, `uploads.read`,
+   * `invoices.read` et `transit.read` en s'appuyant sur un filtrage « appliqué
+   * au-delà de ce contrôle » — qui n'était écrit nulle part. Or `authorize()` +
+   * `tenantScope` scopent à la SOCIÉTÉ, pas au tiers : un transitaire aurait lu
+   * le coût de revient et la marge de tout le parc via `/search/dossier`, et
+   * les pièces fiscales des autres via `/uploads/:id/raw`.
+   *
+   * Le rôle reste défini pour que le schéma et les accès externes puissent être
+   * préparés, mais il n'ouvre rien. Rendre les droits AVANT d'écrire le filtre
+   * reviendrait à livrer une porte sans serrure.
+   *
+   * Pour l'activer : porter `partnerId` dans le contexte (src/lib/context.js),
+   * puis filtrer explicitement search, dossier, uploads et invoices dessus.
+   */
   PARTNER: {
-    dashboard: ['read'],
     notifications: ['read', 'update'],
-    uploads: ['create', 'read'],
-    transit: ['read'],
-    invoices: ['read'],
   },
   READ_ONLY: {
     // lecture seule partout (pas de create/update/delete)

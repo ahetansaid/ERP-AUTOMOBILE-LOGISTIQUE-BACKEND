@@ -42,7 +42,11 @@ function tenantScope(req, res, next) {
           action: 'EXPORT', // accès plateforme à une société cliente
           resource: 'platform_access',
           resourceId: companyId,
-          after: { path: req.originalUrl, method: req.method },
+          // `req.path` : la query string peut contenir `?token=<JWT>`, et cette
+          // ligne est écrite durablement dans audit_logs. Y déposer le jeton
+          // d'un PLATFORM_ADMIN — le seul rôle inter-sociétés — serait le pire
+          // endroit possible.
+          after: { path: req.path, method: req.method, companyId },
           ipAddress:
             req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
             req.socket?.remoteAddress ||

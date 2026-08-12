@@ -117,6 +117,9 @@ async function postEntry(p) {
       cashAccountId: p.cashAccountId ?? null,
       partnerId: p.partnerId ?? null,
       categoryId: p.categoryId ?? null,
+      // Posé à l'INSERT et jamais après : la table est en écriture seule, un
+      // UPDATE ultérieur serait refusé par le déclencheur PostgreSQL.
+      purchaseCostId: p.purchaseCostId ?? null,
       purchaseId: src.purchaseId ?? null,
       invoiceId: src.invoiceId ?? null,
       receiptId: src.receiptId ?? null,

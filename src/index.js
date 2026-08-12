@@ -130,7 +130,10 @@ app.use((err, req, res, next) => {
   log.error('requête en échec', {
     err,
     method: req.method,
-    path: req.originalUrl,
+    // `req.path` et non `req.originalUrl` : la query string peut porter
+    // `?token=<JWT>`, utilisé pour les téléchargements ouverts par window.open.
+    // L'écrire dans les journaux y déposerait un jeton valide en clair.
+    path: req.path,
     userId: req.user?.id ?? null,
   });
   res.status(500).json({

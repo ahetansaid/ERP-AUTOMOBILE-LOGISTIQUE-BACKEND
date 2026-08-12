@@ -28,3 +28,7 @@ test-*.pdf
 
 # Local file storage (uploaded files)
 storage/
+
+# Zone tampon de reprise : contient des données commerciales réelles
+# (VIN, prix d'achat, marges). Le script d'extraction est versionné, pas sa sortie.
+scripts/import/*.json

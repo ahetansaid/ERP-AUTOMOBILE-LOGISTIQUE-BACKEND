@@ -15,7 +15,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { prisma, TENANT_MODELS } = require('../src/lib/prisma');
+const { prisma, TENANT_MODELS, TENANT_BY_ID_MODELS } = require('../src/lib/prisma');
 const { runAsSystem, runUnscoped, getContext } = require('../src/lib/context');
 const { COST_NATURES, OFF_RESULT_NATURES, FIXED_RATES, postEntry } = require('../src/lib/ledger');
 
@@ -27,6 +27,10 @@ test('tous les modèles métier sont protégés par le filtre société', () => 
     'Charge', 'WorkshopQuote', 'Proforma', 'TreasuryTransaction', 'Upload',
     'User', 'AuditLog', 'LedgerEntry', 'CashAccount', 'CostCategory',
     'Partner', 'SearchIndex', 'PurchaseCost', 'AlertRule', 'AlertEvent',
+    // Company n'a pas de colonne companyId : elle est filtrée sur son propre
+    // id. Sans elle dans cette liste, l'omission serait passée inaperçue —
+    // c'est exactement ce qui s'était produit.
+    'Company',
   ];
   const manquants = attendus.filter((m) => !TENANT_MODELS.has(m));
   assert.deepEqual(manquants, [], 'modèles non protégés');
@@ -159,4 +163,70 @@ test("la parité de l'euro est fixe et exacte", () => {
 
 test("le dollar n'a pas de parité fixe : il doit être daté", () => {
   assert.equal(FIXED_RATES.USD, undefined);
+});
+
+
+/* ── Isolation des modèles clés par leur propre identifiant ───────────────── */
+
+test('Company est filtrée sur son id, faute de colonne companyId', () => {
+  assert.ok(TENANT_BY_ID_MODELS.has('Company'));
+  assert.ok(
+    TENANT_MODELS.has('Company'),
+    'Company doit figurer dans les modèles protégés exposés'
+  );
+});
+
+test('une lecture de société hors contexte est refusée', async () => {
+  // Avant correction, prisma.company.findFirst() renvoyait la première société
+  // de la base, toutes entreprises confondues.
+  await assert.rejects(() => prisma.company.findFirst(), /\[tenant\]/);
+});
+
+test("créer une société depuis un contexte client est interdit", async () => {
+  await runAsSystem(1, async () => {
+    await assert.rejects(
+      () => prisma.company.create({ data: { name: 'Société pirate' } }),
+      /\[tenant\]/
+    );
+  });
+});
+
+/* ── Le rôle externe n'ouvre rien tant que le filtrage par tiers n'existe pas ── */
+
+test("PARTNER n'accède à aucune donnée de la société", () => {
+  const { ROLE_PERMISSIONS } = require('../src/middleware/rbac');
+  const droits = ROLE_PERMISSIONS.PARTNER;
+  // Ces modules exposent des données de toute la société : tant qu'aucun
+  // filtre par tiers n'est écrit, les accorder serait une porte sans serrure.
+  for (const module of ['dashboard', 'invoices', 'uploads', 'transit', 'vehicles', 'reports']) {
+    assert.equal(
+      droits[module],
+      undefined,
+      `PARTNER ne doit pas avoir accès à ${module} sans filtrage par tiers`
+    );
+  }
+});
+
+/* ── Le lien vers le frais est posé à l'insertion ─────────────────────────── */
+
+test('postEntry accepte purchaseCostId — il ne peut plus être posé après coup', async () => {
+  // La table étant en écriture seule, un UPDATE ultérieur est refusé par le
+  // déclencheur PostgreSQL : le lien doit exister dès la création.
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'src', 'lib', 'ledger.js'),
+    'utf8'
+  );
+  assert.ok(
+    source.includes('purchaseCostId: p.purchaseCostId'),
+    'postEntry doit propager purchaseCostId'
+  );
+
+  const alloc = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'src', 'lib', 'allocation.js'),
+    'utf8'
+  );
+  assert.ok(
+    !/UPDATE\s+ledger_entries/i.test(alloc),
+    'allocation.js ne doit plus tenter de modifier le grand livre'
+  );
 });
