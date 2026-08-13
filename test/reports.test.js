@@ -79,3 +79,43 @@ test('un rapport approuvé peut être renvoyé en correction', () => {
   assert.ok(TRANSITIONS.APPROUVE.includes('A_CORRIGER'));
   assert.ok(TRANSITIONS.A_CORRIGER.includes('EN_REVUE'));
 });
+
+/* ── Le coût des ventes ne porte que sur ce qui est vendu ─────────────────── */
+
+const { COST_NATURES: NATURES_DE_COUT } = require('../src/lib/ledger');
+
+test('les natures de coût sont celles qui composent un coût de revient', () => {
+  // profitAndLoss n'agrège que celles-ci face au produit ; une nature ajoutée
+  // ici entre mécaniquement dans la marge.
+  assert.deepEqual(NATURES_DE_COUT, [
+    'ACHAT',
+    'LOGISTIQUE',
+    'TAXE',
+    'MANUTENTION',
+    'PREPARATION',
+  ]);
+});
+
+test('le compte de résultat sépare le stock du coût des ventes', () => {
+  // Garde-fou structurel : le calcul doit restreindre le coût aux véhicules
+  // ayant une écriture de VENTE. Sans cette restriction, les 45 véhicules en
+  // stock passaient en charge et la marge affichait −143 937 718 F.
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'src', 'lib', 'costing.js'),
+    'utf8'
+  );
+  assert.match(source, /nature:\s*'VENTE'/, 'les véhicules vendus doivent être identifiés');
+  assert.match(source, /vehicleId:\s*\{\s*in:\s*vendus\s*\}/, 'le coût doit être restreint aux vendus');
+  assert.match(source, /stockValue/, 'le stock doit être exposé à part');
+});
+
+test('la marge ne compte pas un produit dont le coût est inconnu', () => {
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'src', 'lib', 'costing.js'),
+    'utf8'
+  );
+  // grossMargin doit partir du produit RAPPROCHÉ, jamais du produit total :
+  // 34 850 000 F de ventes portent sur des véhicules non chiffrés.
+  assert.match(source, /grossMargin:\s*revenueRapproche\s*-\s*costOfSales/);
+  assert.doesNotMatch(source, /grossMargin:\s*revenue\s*-\s*costOfSales/);
+});

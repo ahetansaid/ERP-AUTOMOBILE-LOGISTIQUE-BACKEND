@@ -118,16 +118,80 @@ async function profitAndLoss(from, to) {
   );
 
   const revenue = byNature.VENTE ?? 0;
-  const costOfSales = COST_NATURES.reduce((s, n) => s + Math.abs(byNature[n] ?? 0), 0);
+
+  /*
+   * Le coût des ventes ne porte QUE sur les véhicules effectivement vendus.
+   *
+   * Additionner toutes les natures de coût de la période revenait à passer en
+   * charge le stock non vendu : sur les données réelles, 198 617 718 F de coûts
+   * s'opposaient à 54 680 000 F de ventes, et la « marge brute » affichait
+   * −143 937 718 F. Ce n'était pas une marge, c'était 45 véhicules en stock
+   * comptés comme perdus.
+   *
+   * Le coût suit la vente, pas le calendrier : un véhicule acheté l'an dernier
+   * et vendu ce mois-ci apporte la TOTALITÉ de son coût en face de son produit.
+   * La borne de période s'applique donc à la vente, jamais au coût.
+   */
+  const ventes = await prisma.ledgerEntry.findMany({
+    where: { ...where, nature: 'VENTE', vehicleId: { not: null } },
+    select: { vehicleId: true },
+    distinct: ['vehicleId'],
+  });
+  const vendus = ventes.map((v) => v.vehicleId);
+
+  const coutVendus = vendus.length
+    ? await prisma.ledgerEntry.aggregate({
+        where: { vehicleId: { in: vendus }, nature: { in: COST_NATURES } },
+        _sum: { amountFcfa: true },
+      })
+    : null;
+  const costOfSales = Math.abs(num(coutVendus?._sum.amountFcfa));
+
+  // Le coût du stock restant : ce n'est pas une charge, c'est un actif. Le
+  // montrer à part évite qu'il se retrouve dans le résultat par défaut.
+  const coutTotalVehicules = COST_NATURES.reduce(
+    (s, n) => s + Math.abs(byNature[n] ?? 0),
+    0
+  );
+  const stockValue = Math.max(0, coutTotalVehicules - costOfSales);
+
+  // Produit sans véhicule rattaché : sa marge est incalculable, et le taire
+  // ferait passer une vente non rapprochée pour une marge pleine.
+  const revenueNonRapproche = await prisma.ledgerEntry.aggregate({
+    where: { ...where, nature: 'VENTE', vehicleId: null },
+    _sum: { amountFcfa: true },
+  });
+
   const overheads = Math.abs(byNature.CHARGE ?? 0);
   const excluded = OFF_RESULT_NATURES.reduce((s, n) => s + (byNature[n] ?? 0), 0);
 
+  /*
+   * La marge oppose ce qui est comparable.
+   *
+   * Sur les données réelles, 34 850 000 F de ventes portent sur des véhicules
+   * qu'aucun classeur ne chiffre. Les compter au numérateur en face du seul
+   * coût des véhicules rapprochés donnerait une marge de 38 100 072 F là où
+   * elle est de 3 250 072 F. La marge brute ne retient donc que les ventes
+   * dont le coût est connu ; le reste est exposé à part, non caché.
+   */
+  const nonRapproche = num(revenueNonRapproche._sum.amountFcfa);
+  const revenueRapproche = revenue - nonRapproche;
+
   return {
     revenue,
+    /** Ventes rattachées à un véhicule dont le coût est connu. */
+    revenueRapproche,
     costOfSales,
-    grossMargin: revenue - costOfSales,
+    grossMargin: revenueRapproche - costOfSales,
     overheads,
+    // Le résultat, lui, prend tout l'argent entré face à tout l'argent sorti.
     result: revenue - costOfSales - overheads,
+    /** Coût des véhicules encore en stock — un actif, jamais une charge. */
+    stockValue,
+    /** Nombre de véhicules vendus sur la période, rattachés à un coût. */
+    vehiculesVendus: vendus.length,
+    /** Produit dont aucun véhicule n'est identifié : marge incalculable. */
+    revenueNonRapproche: nonRapproche,
     // Montré à part, jamais additionné au résultat.
     horsResultat: excluded,
     byNature,
