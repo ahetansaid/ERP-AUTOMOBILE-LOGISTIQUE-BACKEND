@@ -32,3 +32,6 @@ storage/
 # Zone tampon de reprise : contient des données commerciales réelles
 # (VIN, prix d'achat, marges). Le script d'extraction est versionné, pas sa sortie.
 scripts/import/*.json
+
+# La copie des lignes purgées contient des données réelles.
+scripts/purge-ecritures-de-test.json
