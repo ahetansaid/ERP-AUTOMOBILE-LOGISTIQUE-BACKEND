@@ -4,10 +4,29 @@
  * Drivers supportés :
  *   - `local` (défaut) : filesystem. Pour le dev. NE PAS utiliser sur Vercel
  *     (filesystem éphémère/lecture seule en serverless).
+ *   - `db`             : contenu binaire dans PostgreSQL. Aucun service tiers
+ *     à ouvrir, aucune clé à gérer — au prix d'un plafond de taille. Pour des
+ *     pièces justificatives (quelques centaines de PDF), c'est suffisant et
+ *     c'est un compte de moins à administrer.
  *   - `s3`             : stockage objet S3-compatible (Cloudflare R2, AWS S3,
- *     MinIO...). Driver de production sur Vercel.
+ *     MinIO...). Le seul qui tienne pour des photos de véhicules.
  *
- * Sélection via STORAGE_DRIVER=local|s3.
+ * Sélection via STORAGE_DRIVER=local|db|s3.
+ *
+ * CE QUE LE PILOTE `db` COÛTE, ET POURQUOI IL EST PLAFONNÉ
+ *
+ * Le contenu transite entièrement par la mémoire de la fonction serverless :
+ * il n'y a pas de flux paresseux depuis une colonne bytea. Un fichier de
+ * 25 Mo — la limite d'envoi — occuperait donc 25 Mo de mémoire à l'écriture
+ * comme à la lecture, et la réponse dépasserait ce que la plateforme accepte.
+ *
+ * D'où un plafond propre à ce pilote, refusé À L'ENTRÉE avec un message qui
+ * nomme la solution. Un refus explicite vaut mieux qu'un dépôt accepté puis
+ * introuvable.
+ *
+ * Les sauvegardes et les branches Neon copient ce contenu à chaque fois : le
+ * jour où le parc se photographie, il faut passer en `s3`. La bascule ne
+ * change qu'une variable — les fichiers déjà déposés, eux, sont à migrer.
  *
  * Clé de stockage : {kind}/{YYYY}/{MM}/{uuid}.{ext}
  * Les fichiers sont servis via GET /uploads/:id (endpoint protégé).
@@ -25,6 +44,7 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const crypto = require('crypto');
+const { Readable } = require('stream');
 
 const DRIVER = (process.env.STORAGE_DRIVER || 'local').toLowerCase();
 const STORAGE_ROOT =
@@ -67,6 +87,75 @@ async function deleteObjectLocal(storageKey) {
   if (fs.existsSync(abs)) {
     await fsp.unlink(abs);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Driver db (contenu binaire dans PostgreSQL)
+// ---------------------------------------------------------------------------
+
+/**
+ * Plafond du pilote `db`, en octets.
+ *
+ * Huit mégaoctets : au-delà, le passage par la mémoire de la fonction et la
+ * taille de la réponse HTTP deviennent le vrai problème, bien avant la base.
+ * Réglable, mais l'augmenter sans passer à `s3` revient à déplacer la panne.
+ */
+const DB_MAX_BYTES = Number(process.env.STORAGE_DB_MAX_BYTES || 8 * 1024 * 1024);
+
+// Chargé paresseusement : storage.js est requis par des scripts qui n'ouvrent
+// aucune connexion, et prisma.js tire tout le client avec lui.
+function db() {
+  // eslint-disable-next-line global-require
+  return require('./prisma').prisma;
+}
+
+function ctxCompanyId() {
+  // eslint-disable-next-line global-require
+  const { getContext } = require('./context');
+  const cid = getContext()?.companyId;
+  if (cid == null) {
+    throw new Error(
+      '[storage] écriture de fichier hors contexte société : le pilote `db` ' +
+        'range le contenu par société, il lui faut savoir laquelle.'
+    );
+  }
+  return cid;
+}
+
+async function putObjectDb(storageKey, buffer, contentType) {
+  if (buffer.length > DB_MAX_BYTES) {
+    const mo = (n) => `${(n / 1024 / 1024).toFixed(1)} Mo`;
+    throw new Error(
+      `Fichier trop volumineux pour le stockage en base : ${mo(buffer.length)} ` +
+        `pour un plafond de ${mo(DB_MAX_BYTES)}. Pour des fichiers plus lourds ` +
+        '— photos de véhicules notamment — passez STORAGE_DRIVER=s3.'
+    );
+  }
+
+  await db().fileBlob.create({
+    data: {
+      storageKey,
+      companyId: ctxCompanyId(),
+      contentType: contentType || 'application/octet-stream',
+      sizeBytes: buffer.length,
+      data: buffer,
+    },
+  });
+  return storageKey;
+}
+
+async function streamObjectDb(storageKey) {
+  // Le filtre société de l'extension Prisma s'applique : une clé appartenant à
+  // une autre entreprise n'est tout simplement pas trouvée.
+  const blob = await db().fileBlob.findFirst({ where: { storageKey } });
+  if (!blob) throw new Error(`Fichier introuvable : ${storageKey}`);
+  return Readable.from(Buffer.from(blob.data));
+}
+
+async function deleteObjectDb(storageKey) {
+  // deleteMany plutôt que delete : une clé déjà absente n'est pas une erreur,
+  // et la suppression d'une pièce ne doit pas échouer pour ça.
+  await db().fileBlob.deleteMany({ where: { storageKey } });
 }
 
 // ---------------------------------------------------------------------------
@@ -148,9 +237,8 @@ async function putObject({ kind, originalName, buffer, contentType }) {
     await putObjectLocal(key, buffer);
     return key;
   }
-  if (DRIVER === 's3') {
-    return putObjectS3(key, buffer, contentType);
-  }
+  if (DRIVER === 'db') return putObjectDb(key, buffer, contentType);
+  if (DRIVER === 's3') return putObjectS3(key, buffer, contentType);
   throw new Error(`Driver stockage non supporté : ${DRIVER}`);
 }
 
@@ -160,12 +248,14 @@ async function putObject({ kind, originalName, buffer, contentType }) {
  */
 async function streamObject(storageKey) {
   if (DRIVER === 'local') return streamObjectLocal(storageKey);
+  if (DRIVER === 'db') return streamObjectDb(storageKey);
   if (DRIVER === 's3') return streamObjectS3(storageKey);
   throw new Error(`Driver stockage non supporté : ${DRIVER}`);
 }
 
 async function deleteObject(storageKey) {
   if (DRIVER === 'local') return deleteObjectLocal(storageKey);
+  if (DRIVER === 'db') return deleteObjectDb(storageKey);
   if (DRIVER === 's3') return deleteObjectS3(storageKey);
   throw new Error(`Driver stockage non supporté : ${DRIVER}`);
 }
@@ -173,6 +263,7 @@ async function deleteObject(storageKey) {
 module.exports = {
   DRIVER,
   STORAGE_ROOT,
+  DB_MAX_BYTES,
   putObject,
   streamObject,
   deleteObject,

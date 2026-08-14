@@ -1233,3 +1233,21 @@ model Upload {
   @@index([docNumber], map: "idx_uploads_doc_number")
   @@map("uploads")
 }
+
+/// Contenu binaire des fichiers, pour le pilote de stockage `db`.
+///
+/// Séparé de `Upload` à dessein : `Upload` porte les métadonnées, consultées
+/// en liste à longueur de journée ; le binaire, lui, n'est lu qu'au
+/// téléchargement. Les garder dans deux tables évite que chaque listing de
+/// pièces traîne des mégaoctets derrière lui.
+model FileBlob {
+  storageKey  String   @id @map("storage_key") @db.VarChar(500)
+  companyId   Int      @map("company_id")
+  contentType String   @map("content_type") @db.VarChar(150)
+  sizeBytes   Int      @map("size_bytes")
+  data        Bytes
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([companyId], map: "idx_file_blob_company")
+  @@map("file_blobs")
+}
