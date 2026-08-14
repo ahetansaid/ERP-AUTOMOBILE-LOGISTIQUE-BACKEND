@@ -3,9 +3,15 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   },
+  "crons": [
+    {
+      "path": "/cron/quotidien",
+      "schedule": "0 2 * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",

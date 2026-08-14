@@ -28,6 +28,7 @@ const rapportsRoutes = require('./routes/reportsPeriodiques');
 const alertesRoutes = require('./routes/alertes');
 const fraisRoutes = require('./routes/purchaseCosts');
 const installationRoutes = require('./routes/installation');
+const cronRoutes = require('./routes/cron');
 const { authMiddleware, downloadTokenBridge } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
@@ -129,6 +130,13 @@ function mount(prefix) {
 
 mount('');
 mount('/api');
+
+// Tâches planifiées. Hors des gardes de session : l'appelant n'est pas un
+// utilisateur mais la plateforme de cron, qui s'authentifie par CRON_SECRET.
+// Montée sur les deux préfixes comme le reste, pour que la configuration Vercel
+// fonctionne quel que soit le chemin retenu.
+app.use('/cron', cronRoutes);
+app.use('/api/cron', cronRoutes);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
