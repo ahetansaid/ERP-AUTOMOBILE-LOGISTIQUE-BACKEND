@@ -5,6 +5,7 @@ const { prisma } = require('../lib/prisma');
 const { putObject, streamObject, deleteObject } = require('../lib/storage');
 const { authorize } = require('../middleware/rbac');
 
+const { restoreContext } = require('../lib/context');
 const router = express.Router();
 
 // Upload en mémoire (max 25MB). On lit le buffer puis on appelle storage.putObject.
@@ -132,6 +133,9 @@ router.post(
   '/',
   authorize('uploads', 'create'),
   upload.single('file'),
+  // multer 2 termine l'analyse du multipart hors du contexte de la requête :
+  // sans ce rétablissement, tout ce qui suit ignore la société.
+  restoreContext,
   async (req, res) => {
     try {
       if (!req.file) {

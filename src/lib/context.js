@@ -43,8 +43,30 @@ function withContext(req, res, next) {
     unscoped: false,
   };
   req.correlationId = ctx.correlationId;
+  // Conservé sur la requête pour pouvoir REVENIR dans ce contexte si un
+  // intergiciel en aval casse la chaîne asynchrone (voir restoreContext).
+  req.ctx = ctx;
   res.setHeader('X-Correlation-Id', ctx.correlationId);
   storage.run(ctx, next);
+}
+
+/**
+ * Rétablit le contexte de la requête.
+ *
+ * Certains intergiciels rompent la chaîne AsyncLocalStorage : multer 2 le fait
+ * en terminant l'analyse du multipart depuis un évènement de flux qui n'hérite
+ * plus du contexte ouvert par `withContext`. Tout ce qui suit se retrouve alors
+ * SANS société — et comme l'extension Prisma échoue fermé, la route entière
+ * tombe en erreur 500 plutôt que de fuir des données. Le garde-fou tient, mais
+ * la fonctionnalité meurt.
+ *
+ * À placer juste après l'intergiciel fautif. Le MÊME objet de contexte est
+ * réutilisé : identifiant de corrélation, utilisateur et ensemble des écritures
+ * déjà tracées sont préservés, donc l'audit reste cohérent.
+ */
+function restoreContext(req, res, next) {
+  if (!req.ctx) return next();
+  return storage.run(req.ctx, next);
 }
 
 /**
@@ -77,4 +99,11 @@ function runAsSystem(companyId, fn) {
   );
 }
 
-module.exports = { getContext, withContext, runUnscoped, runAsSystem, storage };
+module.exports = {
+  getContext,
+  withContext,
+  restoreContext,
+  runUnscoped,
+  runAsSystem,
+  storage,
+};
