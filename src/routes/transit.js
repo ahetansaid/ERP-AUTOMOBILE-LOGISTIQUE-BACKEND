@@ -4,6 +4,7 @@ const { toSnake } = require('../lib/serialize');
 const { notify } = require('../services/notifications');
 
 const router = express.Router();
+const { authorize } = require('../middleware/rbac');
 
 // Workflow transit : ordre logique des étapes (côte ouest-africaine)
 const STEPS_ORDER = [
@@ -32,7 +33,7 @@ function toDateOnly(d) {
 }
 
 // GET /transit/steps/summary — compte par étape (scope tenant)
-router.get('/steps/summary', async (req, res) => {
+router.get('/steps/summary', authorize('transit', 'read'), async (req, res) => {
   try {
     const companyId = req.companyId ?? req.user?.companyId ?? null;
     const result = [];
@@ -57,7 +58,7 @@ router.get('/steps/summary', async (req, res) => {
 });
 
 // GET /transit/steps — liste complète avec infos véhicule (scope tenant)
-router.get('/steps', async (req, res) => {
+router.get('/steps', authorize('transit', 'read'), async (req, res) => {
   try {
     const companyId = req.companyId ?? req.user?.companyId ?? null;
     const vehicleId = req.query.vehicleId ? Number(req.query.vehicleId) : null;
@@ -111,7 +112,7 @@ router.get('/steps', async (req, res) => {
 });
 
 // POST /transit/steps — crée une nouvelle étape pour un véhicule
-router.post('/steps', async (req, res) => {
+router.post('/steps', authorize('transit', 'create'), async (req, res) => {
   try {
     const body = req.body || {};
     const vehicleId = Number(body.vehicleId ?? body.vehicle_id);
@@ -162,7 +163,7 @@ router.post('/steps', async (req, res) => {
 });
 
 // PATCH /transit/steps/:id — met à jour une étape (dates, nom)
-router.patch('/steps/:id', async (req, res) => {
+router.patch('/steps/:id', authorize('transit', 'update'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) {
@@ -220,7 +221,7 @@ router.patch('/steps/:id', async (req, res) => {
 });
 
 // POST /transit/steps/advance — avance un véhicule à l'étape suivante
-router.post('/steps/advance', async (req, res) => {
+router.post('/steps/advance', authorize('transit', 'update'), async (req, res) => {
   try {
     const vehicleId = Number(req.body?.vehicleId ?? req.body?.vehicle_id);
     if (!Number.isInteger(vehicleId)) {
@@ -284,7 +285,7 @@ router.post('/steps/advance', async (req, res) => {
 });
 
 // DELETE /transit/steps/:id
-router.delete('/steps/:id', async (req, res) => {
+router.delete('/steps/:id', authorize('transit', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) {

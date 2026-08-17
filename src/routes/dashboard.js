@@ -2,6 +2,7 @@ const express = require('express');
 const { prisma } = require('../lib/prisma');
 
 const router = express.Router();
+const { authorize } = require('../middleware/rbac');
 
 // Minuit il y a N jours (équivalent DATE_SUB(CURDATE(), INTERVAL N DAY)).
 function midnightDaysAgo(n) {
@@ -11,7 +12,7 @@ function midnightDaysAgo(n) {
   return d;
 }
 
-router.get('/stats', async (req, res) => {
+router.get('/stats', authorize('dashboard', 'read'), async (req, res) => {
   try {
     // req.companyId vient de tenantScope (override ?companyId réservé aux ADMIN).
     const companyId = req.companyId;
@@ -75,7 +76,7 @@ router.get('/stats', async (req, res) => {
  *
  * Chaque alerte a : id, severity (info/warning/danger), title, message, link, count.
  */
-router.get('/alerts', async (req, res) => {
+router.get('/alerts', authorize('dashboard', 'read'), async (req, res) => {
   try {
     const companyId =
       req.companyId ?? req.user?.companyId ?? null;

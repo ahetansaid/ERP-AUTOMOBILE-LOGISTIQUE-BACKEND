@@ -84,3 +84,63 @@ test('le pilote local est documenté comme inutilisable en ligne', () => {
   // C’est la panne la plus coûteuse de la liste : elle est silencieuse.
   assert.match(SOURCE, /NE PAS utiliser sur Vercel/);
 });
+
+/* ── Ce qui est servi au navigateur ───────────────────────────────────────── */
+
+const ROUTE_UPLOADS = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'routes', 'uploads.js'),
+  'utf8'
+);
+
+test('OTHER n’est plus un contournement du contrôle de type', () => {
+  // `if (!list) return true` laissait passer n'importe quel type déclaré pour
+  // kind=OTHER — text/html compris — et le fichier était ensuite servi avec ce
+  // type en inline. Le navigateur le rendait.
+  assert.match(ROUTE_UPLOADS, /MIME_OTHER/);
+
+  // On lit le CORPS de la fonction, ligne à ligne : le commentaire qui
+  // documente l'ancien défaut en cite le code, et un test portant sur tout le
+  // fichier échouerait sur sa propre citation.
+  const L = ROUTE_UPLOADS.split(String.fromCharCode(10));
+  const debut = L.findIndex((l) => l.includes('function validateMime('));
+  const fin = L.findIndex((l, i) => i > debut && l === '}');
+  assert.ok(debut > -1 && fin > debut, 'validateMime doit être trouvable');
+  const corps = L.slice(debut, fin).join(' ');
+
+  assert.doesNotMatch(corps, /return true/, 'aucun kind ne doit passer sans liste');
+  assert.match(corps, /return false/, 'un kind sans liste doit refuser');
+  assert.match(corps, /MIME_OTHER/, 'OTHER doit avoir sa propre liste');
+});
+
+test('le type renvoyé ne vient jamais du client tel quel', () => {
+  // row.mimeType est celui déclaré à l'envoi. Le ressortir en Content-Type
+  // laisse le client décider comment le navigateur traite le contenu.
+  const bloc = ROUTE_UPLOADS.slice(ROUTE_UPLOADS.indexOf("router.get('/:id/raw'"));
+  const reponse = bloc.slice(0, bloc.indexOf('stream.pipe'));
+  assert.match(reponse, /mimeDeSortie\(/);
+  assert.doesNotMatch(reponse, /setHeader\('Content-Type',\s*row\.mimeType/);
+});
+
+test('seul ce qui ne peut pas porter de script s’affiche en direct', () => {
+  const affichables = ROUTE_UPLOADS.slice(ROUTE_UPLOADS.indexOf('const AFFICHABLES'));
+  const liste = affichables.slice(0, affichables.indexOf(']'));
+  for (const dangereux of ['svg', 'html', 'xml']) {
+    assert.doesNotMatch(liste, new RegExp(dangereux), `${dangereux} ne doit pas être affichable`);
+  }
+  assert.match(liste, /application\/pdf/);
+  // Le reste part en pièce jointe.
+  assert.match(ROUTE_UPLOADS, /AFFICHABLES\.has\(type\) \? 'inline' : 'attachment'/);
+});
+
+test('le SVG n’est plus accepté comme logo', () => {
+  // Un SVG est une image pour l'œil et un document scriptable pour le navigateur.
+  const bloc = ROUTE_UPLOADS.slice(ROUTE_UPLOADS.indexOf('COMPANY_LOGO:'));
+  assert.doesNotMatch(bloc.slice(0, 120), /svg/);
+});
+
+test('nosniff est posé sur la réponse du fichier', () => {
+  // helmet le pose globalement ; le répéter ici protège la route même si la
+  // configuration globale change un jour.
+  const bloc = ROUTE_UPLOADS.slice(ROUTE_UPLOADS.indexOf("router.get('/:id/raw'"));
+  assert.match(bloc.slice(0, 2000), /X-Content-Type-Options/);
+});

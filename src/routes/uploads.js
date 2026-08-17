@@ -41,7 +41,8 @@ const FISCAL_KINDS = new Set([
 // Whitelist de types acceptés par kind (simple protection)
 const ALLOWED_MIME = {
   VEHICLE_PHOTO: ['image/jpeg', 'image/png', 'image/webp', 'image/heic'],
-  COMPANY_LOGO: ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'],
+  // Pas de SVG : un SVG embarque du script, et il était servi en inline.
+  COMPANY_LOGO: ['image/jpeg', 'image/png', 'image/webp'],
   USER_AVATAR: ['image/jpeg', 'image/png', 'image/webp'],
   // Les documents acceptent aussi PDF
   PURCHASE_DOCUMENT: [
@@ -67,10 +68,56 @@ const ALLOWED_MIME = {
   OTHER: null, // tout accepté
 };
 
+/**
+ * Types autorisés pour OTHER.
+ *
+ * `if (!list) return true` faisait de OTHER un contournement complet : n'importe
+ * quel type déclaré passait, y compris text/html, et le fichier était ensuite
+ * SERVI avec ce type en `Content-Disposition: inline`. Le navigateur le rendait.
+ * OTHER a désormais sa liste, comme les autres.
+ */
+const MIME_OTHER = [
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'text/csv',
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel',
+];
+
+/**
+ * Types que le navigateur peut afficher SANS risque d'exécuter du script.
+ *
+ * Tout ce qui n'est pas là est servi en pièce jointe. Un SVG est une image pour
+ * l'œil et un document scriptable pour le navigateur : il n'a rien à faire ici.
+ */
+const AFFICHABLES = new Set([
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+
 function validateMime(kind, mimeType) {
-  const list = ALLOWED_MIME[kind];
-  if (!list) return true; // OTHER
+  const list = kind === 'OTHER' ? MIME_OTHER : ALLOWED_MIME[kind];
+  if (!list) return false; // aucun type connu pour ce kind : on refuse
   return list.includes(mimeType);
+}
+
+/**
+ * Type à renvoyer au navigateur.
+ *
+ * JAMAIS celui déclaré par le client tel quel : il décide comment le navigateur
+ * traite le contenu. On ne ressort que les types que la plateforme a acceptés à
+ * l'entrée ; tout le reste devient un flux d'octets anonyme.
+ */
+function mimeDeSortie(kind, stocke) {
+  const autorises = kind === 'OTHER' ? MIME_OTHER : ALLOWED_MIME[kind] || [];
+  return autorises.includes(stocke) ? stocke : 'application/octet-stream';
 }
 
 /**
@@ -327,12 +374,19 @@ router.get('/:id/raw', authorize('uploads', 'read'), async (req, res) => {
     }
 
     const stream = await streamObject(row.storageKey);
-    const type =
-      row.mimeType || mime.lookup(row.fileName) || 'application/octet-stream';
+
+    // Le type est ramené à ce que la plateforme a accepté pour ce kind, et
+    // l'affichage direct réservé à ce qui ne peut pas porter de script. Le
+    // reste part en pièce jointe : le navigateur le télécharge au lieu de
+    // l'interpréter.
+    const type = mimeDeSortie(row.kind, row.mimeType);
+    const disposition = AFFICHABLES.has(type) ? 'inline' : 'attachment';
+
     res.setHeader('Content-Type', type);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader(
       'Content-Disposition',
-      `inline; filename="${encodeURIComponent(row.fileName)}"`
+      `${disposition}; filename="${encodeURIComponent(row.fileName)}"`
     );
     res.setHeader('Cache-Control', 'private, max-age=3600');
     stream.pipe(res);
