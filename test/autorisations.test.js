@@ -115,3 +115,36 @@ test('le module demandé par authorize existe dans la matrice', () => {
   }
   assert.deepEqual(inconnus, [], 'modules absents de la matrice RBAC :\n  ' + inconnus.join('\n  '));
 });
+
+/* ── Suppression d'un véhicule : ce qui protège le grand livre ────────────── */
+
+test('la suppression d’un véhicule refuse dès qu’il a laissé une trace', () => {
+  // `ledger_entries.vehicle_id` n'a AUCUNE contrainte vers `vehicles` : la base
+  // ne bloquerait pas la suppression. Elle laisserait les écritures de coût en
+  // place, toujours comptées dans les totaux, rattachées à un véhicule
+  // introuvable — et le grand livre étant en écriture seule, on ne pourrait plus
+  // jamais les retirer. Le contrôle est donc dans le code, ou nulle part.
+  const source = fs.readFileSync(path.join(DOSSIER, 'vehicles.js'), 'utf8');
+  const bloc = source.slice(source.indexOf("router.delete('/:id'"));
+
+  const controle = bloc.indexOf('ledgerEntry.count');
+  const suppression = bloc.indexOf('vehicle.delete');
+  assert.ok(controle > -1, 'les écritures doivent être comptées');
+  assert.ok(suppression > -1, 'la suppression doit exister');
+  assert.ok(controle < suppression, 'le contrôle doit précéder la suppression');
+
+  assert.match(bloc, /invoice\.count/, 'les factures doivent bloquer aussi');
+  assert.match(bloc, /statusCode: 409/, 'le refus doit être un conflit, pas une erreur serveur');
+  // Un refus qui ne nomme pas ce qui bloque envoie chercher dans le code.
+  assert.match(bloc, /traces/, 'le refus doit nommer ce qui bloque');
+});
+
+test('supprimer un véhicule est tracé au journal d’audit', () => {
+  const source = fs.readFileSync(path.join(DOSSIER, 'vehicles.js'), 'utf8');
+  const bloc = source.slice(source.indexOf("router.delete('/:id'"));
+  assert.match(bloc, /req\.audit\(/);
+  assert.match(bloc, /action: 'DELETE'/);
+  // L'état avant est conservé : sans lui, la trace dit qu'on a supprimé sans
+  // dire quoi.
+  assert.match(bloc, /before: vehicle/);
+});

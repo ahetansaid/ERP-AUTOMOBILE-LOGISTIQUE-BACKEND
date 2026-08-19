@@ -103,7 +103,10 @@ test('OTHER n’est plus un contournement du contrôle de type', () => {
   // fichier échouerait sur sa propre citation.
   const L = ROUTE_UPLOADS.split(String.fromCharCode(10));
   const debut = L.findIndex((l) => l.includes('function validateMime('));
-  const fin = L.findIndex((l, i) => i > debut && l === '}');
+  // .trim() : Git convertit les fins de ligne en CRLF au passage, et une
+  // comparaison exacte sur une accolade seule echoue alors sur le retour
+  // chariot invisible qui la suit.
+  const fin = L.findIndex((l, i) => i > debut && l.trim() === '}');
   assert.ok(debut > -1 && fin > debut, 'validateMime doit être trouvable');
   const corps = L.slice(debut, fin).join(' ');
 

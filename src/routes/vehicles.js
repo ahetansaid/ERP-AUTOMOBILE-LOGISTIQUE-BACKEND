@@ -402,4 +402,84 @@ router.get('/:id/timeline', authorize('vehicles', 'read'), async (req, res) => {
   }
 });
 
+/**
+ * DELETE /vehicles/:id — retirer un véhicule entré par erreur.
+ *
+ * REFUSE PAR CONSTRUCTION dès que le véhicule a laissé une trace comptable.
+ *
+ * `ledger_entries.vehicle_id` n'a volontairement aucune contrainte vers
+ * `vehicles` : le grand livre ne doit dépendre de rien pour rester intact. La
+ * conséquence est qu'une suppression naïve ne serait PAS bloquée par la base —
+ * elle laisserait les écritures de coût en place, toujours comptées dans le coût
+ * des ventes et la valeur du stock, mais rattachées à un véhicule introuvable.
+ * Et le grand livre étant en écriture seule, ces écritures ne pourraient plus
+ * jamais être retirées.
+ *
+ * D'où un contrôle explicite AVANT toute suppression. Un véhicule qui porte des
+ * écritures, une facture ou un devis ne se supprime pas : il se sort du parc en
+ * contre-passant ses écritures, ce qui laisse une trace au lieu d'un trou.
+ *
+ * Le rattachement au conteneur (`purchase_vehicles`) est en CASCADE : il
+ * disparaît avec le véhicule, ce qui est correct — c'est un lien, pas une trace.
+ */
+router.delete('/:id', authorize('vehicles', 'delete'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+
+    const vehicle = await prisma.vehicle.findFirst({
+      where: { id, ...req.tenantWhere() },
+    });
+    if (!vehicle) {
+      return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    }
+
+    // Chaque compte est fait séparément pour pouvoir NOMMER ce qui bloque :
+    // « impossible de supprimer » sans dire pourquoi envoie l'utilisateur
+    // chercher dans le code.
+    const [ecritures, factures, devis, recus] = await Promise.all([
+      prisma.ledgerEntry.count({ where: { vehicleId: id } }),
+      prisma.invoice.count({ where: { vehicleId: id } }),
+      prisma.workshopQuote.count({ where: { vehicleId: id } }),
+      prisma.receipt.count({ where: { invoice: { vehicleId: id } } }).catch(() => 0),
+    ]);
+
+    const traces = [
+      ecritures && `${ecritures} écriture(s) au grand livre`,
+      factures && `${factures} facture(s)`,
+      devis && `${devis} devis`,
+      recus && `${recus} reçu(s)`,
+    ].filter(Boolean);
+
+    if (traces.length) {
+      return res.status(409).json({
+        message:
+          `Ce véhicule ne peut pas être supprimé : il porte ${traces.join(', ')}. ` +
+          'Le grand livre ne s’efface pas — supprimer le véhicule laisserait ses ' +
+          'coûts comptés dans les totaux, rattachés à un véhicule introuvable. ' +
+          'Contre-passez d’abord ses écritures, puis marquez-le hors parc.',
+        statusCode: 409,
+        traces: { ecritures, factures, devis, recus },
+      });
+    }
+
+    await prisma.vehicle.delete({ where: { id } });
+
+    req.audit({
+      action: 'DELETE',
+      resource: 'vehicles',
+      resourceId: id,
+      before: vehicle,
+      after: null,
+    });
+
+    return res.status(204).end();
+  } catch (err) {
+    console.error('[vehicles.delete]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
 module.exports = router;
