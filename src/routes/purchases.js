@@ -280,19 +280,77 @@ router.patch('/:id/arrive', authorize('purchases', 'update'), async (req, res) =
   }
 });
 
+/**
+ * DELETE /purchases/:id — retirer un conteneur entré par erreur.
+ *
+ * L'ancienne version ne contrôlait que le STATUT : elle refusait tout ce qui
+ * n'était pas EN_COURS, et acceptait tout le reste. Deux défauts symétriques.
+ *
+ * Trop permissive là où ça compte : un conteneur EN_COURS peut déjà porter des
+ * frais de fret ventilés, donc des écritures au grand livre. Or
+ * `ledger_entries.purchase_id` n'a aucune contrainte vers `purchases` — la base
+ * ne l'aurait pas bloqué. Les écritures seraient restées, comptées dans les
+ * totaux, rattachées à un conteneur introuvable, et le grand livre étant en
+ * écriture seule, plus jamais retirables.
+ *
+ * Elle détachait aussi les véhicules en silence, par un deleteMany sur la table
+ * de liaison. Les véhicules survivaient, mais perdaient la trace de leur
+ * arrivée — c'est-à-dire la seule chose qui rattache un châssis à sa caisse.
+ *
+ * Trop restrictive là où ça ne compte pas : un conteneur ARRIVÉ mais vide, sans
+ * frais ni écriture, est parfaitement supprimable. Le statut ne dit rien de la
+ * trace comptable ; ce sont les traces qu'il faut regarder.
+ */
 router.delete('/:id', authorize('purchases', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const current = await prisma.purchase.findFirst({ where: { id, ...req.tenantWhere() }, select: { status: true } });
-    if (!current) return res.status(404).json({ message: 'Achat introuvable', statusCode: 404 });
-    if (current.status !== 'EN_COURS') {
-      return res.status(409).json({ message: 'Suppression autorisée uniquement si statut EN_COURS', statusCode: 409 });
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
     }
-    await prisma.purchaseVehicle.deleteMany({ where: { purchaseId: id } });
+
+    const current = await prisma.purchase.findFirst({ where: { id, ...req.tenantWhere() } });
+    if (!current) {
+      return res.status(404).json({ message: 'Conteneur introuvable', statusCode: 404 });
+    }
+
+    // Comptés séparément pour pouvoir NOMMER ce qui bloque.
+    const [vehicules, ecritures, frais] = await Promise.all([
+      prisma.purchaseVehicle.count({ where: { purchaseId: id } }),
+      prisma.ledgerEntry.count({ where: { purchaseId: id } }),
+      prisma.purchaseCost.count({ where: { purchaseId: id } }),
+    ]);
+
+    const traces = [
+      vehicules && `${vehicules} véhicule(s) rattaché(s)`,
+      ecritures && `${ecritures} écriture(s) au grand livre`,
+      frais && `${frais} frais de conteneur`,
+    ].filter(Boolean);
+
+    if (traces.length) {
+      return res.status(409).json({
+        message:
+          `Ce conteneur ne peut pas être supprimé : il porte ${traces.join(', ')}. ` +
+          'Détachez d’abord ses véhicules, et contre-passez ses écritures — le ' +
+          'grand livre ne s’efface pas, et supprimer le conteneur laisserait ses ' +
+          'coûts comptés dans les totaux sans plus rien à quoi les rattacher.',
+        statusCode: 409,
+        traces: { vehicules, ecritures, frais },
+      });
+    }
+
     await prisma.purchase.delete({ where: { id } });
+
+    req.audit({
+      action: 'DELETE',
+      resource: 'purchases',
+      resourceId: id,
+      before: current,
+      after: null,
+    });
+
     return res.status(204).send();
   } catch (err) {
-    console.error(err);
+    console.error('[purchases.delete]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });

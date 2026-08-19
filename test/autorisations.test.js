@@ -148,3 +148,38 @@ test('supprimer un véhicule est tracé au journal d’audit', () => {
   // dire quoi.
   assert.match(bloc, /before: vehicle/);
 });
+
+test('la suppression d’un conteneur refuse dès qu’il a laissé une trace', () => {
+  // L'ancienne version ne regardait que le statut : elle refusait tout ce qui
+  // n'était pas EN_COURS et acceptait tout le reste. Or un conteneur EN_COURS
+  // peut déjà porter des frais ventilés, donc des écritures — et
+  // `ledger_entries.purchase_id` n'a aucune contrainte vers `purchases`.
+  const source = fs.readFileSync(path.join(DOSSIER, 'purchases.js'), 'utf8');
+  const bloc = source.slice(source.indexOf("router.delete('/:id'"));
+
+  const controle = bloc.indexOf('ledgerEntry.count');
+  const suppression = bloc.indexOf('purchase.delete');
+  assert.ok(controle > -1, 'les écritures doivent être comptées');
+  assert.ok(controle < suppression, 'le contrôle doit précéder la suppression');
+
+  assert.match(bloc, /purchaseVehicle\.count/, 'les véhicules rattachés doivent bloquer');
+  assert.match(bloc, /purchaseCost\.count/, 'les frais doivent bloquer');
+  assert.match(bloc, /statusCode: 409/);
+  assert.match(bloc, /traces/, 'le refus doit nommer ce qui bloque');
+});
+
+test('la suppression d’un conteneur ne détache plus les véhicules en silence', () => {
+  // Un deleteMany sur la liaison faisait survivre les véhicules en leur retirant
+  // la trace de leur arrivée — la seule chose qui rattache un châssis à sa caisse.
+  const source = fs.readFileSync(path.join(DOSSIER, 'purchases.js'), 'utf8');
+  const bloc = source.slice(source.indexOf("router.delete('/:id'"));
+  assert.doesNotMatch(bloc, /purchaseVehicle\.deleteMany/);
+});
+
+test('le statut n’est plus le seul critère de suppression d’un conteneur', () => {
+  // Un conteneur ARRIVÉ mais vide est parfaitement supprimable. Le statut ne dit
+  // rien de la trace comptable.
+  const source = fs.readFileSync(path.join(DOSSIER, 'purchases.js'), 'utf8');
+  const bloc = source.slice(source.indexOf("router.delete('/:id'"));
+  assert.doesNotMatch(bloc, /status !== 'EN_COURS'/);
+});

@@ -555,6 +555,16 @@ model Vehicle {
   /// Poids brut, tel que déclaré au connaissement. Sert de clé de répartition
   /// au prorata du poids — donnée déjà présente sur vos BL, jamais exploitée.
   weightKg          Int?          @map("weight_kg")
+
+  /// Archivage — décision de VISIBILITÉ, jamais de comptabilité.
+  ///
+  /// Un véhicule archivé sort des listes ; ses écritures restent au grand livre
+  /// et continuent de compter. Faire autrement offrirait un moyen discret de
+  /// modifier les comptes en changeant un simple drapeau, ce que toute
+  /// l'architecture s'emploie à rendre impossible. Pour qu'un coût cesse de
+  /// compter, il faut le contre-passer — et cela laisse une trace.
+  archivedAt        DateTime?     @map("archived_at")
+  archiveReason     String?       @map("archive_reason") @db.VarChar(500)
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime?     @updatedAt @map("updated_at")
 
