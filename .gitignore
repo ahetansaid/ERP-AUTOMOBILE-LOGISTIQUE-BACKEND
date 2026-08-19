@@ -35,3 +35,6 @@ scripts/import/*.json
 
 # La copie des lignes purgées contient des données réelles.
 scripts/purge-ecritures-de-test.json
+
+# Feuille de qualification : contient les libellés réels de la caisse.
+scripts/feuille-charges.json
