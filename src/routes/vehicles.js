@@ -2,6 +2,7 @@ const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { authorize } = require('../middleware/rbac');
 const { upsertTransportForVehicle } = require('../services/treasuryTransactions');
+const { NON_ARCHIVES, ARCHIVES } = require('../lib/archive');
 
 const router = express.Router();
 
@@ -103,12 +104,17 @@ function enrichVehicle(v, extras = {}) {
 router.get('/', authorize('vehicles', 'read'), async (req, res) => {
   try {
     const { status, search } = req.query;
+    // Le parc vivant par défaut. `?archives=1` montre au contraire ce qui a été
+    // mis de côté — sinon un véhicule archivé deviendrait introuvable, et
+    // l'archivage un moyen de perdre des choses.
+    const vueArchives = String(req.query.archives || '') === '1';
     const page = parseIntParam(req.query.page, 1, 1, 10_000);
     const perPage = parseIntParam(req.query.limit, 20, 1, 100);
     const offset = (page - 1) * perPage;
 
     const where = {
       ...req.tenantWhere(),
+      ...(vueArchives ? ARCHIVES : NON_ARCHIVES),
       ...(status ? { status } : {}),
       ...(search
         ? {
@@ -478,6 +484,85 @@ router.delete('/:id', authorize('vehicles', 'delete'), async (req, res) => {
     return res.status(204).end();
   } catch (err) {
     console.error('[vehicles.delete]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+/**
+ * POST /vehicles/:id/archiver { motif }
+ *
+ * Sort le véhicule des listes, du tableau de bord, des alertes et du rapport de
+ * stock. NE TOUCHE PAS AU GRAND LIVRE : ses écritures continuent de compter.
+ *
+ * Le motif est OBLIGATOIRE. Un archivage sans raison, c'est un véhicule qui
+ * disparaît sans que personne ne sache pourquoi six mois plus tard — et comme
+ * l'opération est réversible, la seule chose qui compte est de pouvoir la
+ * relire.
+ */
+router.post('/:id/archiver', authorize('vehicles', 'update'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+    const motif = String(req.body?.motif ?? req.body?.reason ?? '').trim();
+    if (motif.length < 3) {
+      return res.status(400).json({
+        message: 'Un motif d’archivage est requis — au moins trois caractères.',
+        statusCode: 400,
+      });
+    }
+
+    const before = await prisma.vehicle.findFirst({ where: { id, ...req.tenantWhere() } });
+    if (!before) {
+      return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    }
+    if (before.archivedAt) {
+      return res.status(409).json({ message: 'Ce véhicule est déjà archivé', statusCode: 409 });
+    }
+
+    const updated = await prisma.vehicle.update({
+      where: { id },
+      data: { archivedAt: new Date(), archiveReason: motif.slice(0, 500) },
+    });
+
+    req.audit({ action: 'UPDATE', resource: 'vehicles', resourceId: id, before, after: updated });
+
+    // Le nombre d'écritures est renvoyé pour que l'appelant puisse le dire :
+    // archiver ne fait pas disparaître cet argent des totaux.
+    const ecritures = await prisma.ledgerEntry.count({ where: { vehicleId: id } });
+    return res.status(200).json({ ...enrichVehicle(updated), ecritures });
+  } catch (err) {
+    console.error('[vehicles.archiver]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+/** POST /vehicles/:id/desarchiver — remet le véhicule dans le parc visible. */
+router.post('/:id/desarchiver', authorize('vehicles', 'update'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+    const before = await prisma.vehicle.findFirst({ where: { id, ...req.tenantWhere() } });
+    if (!before) {
+      return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    }
+    if (!before.archivedAt) {
+      return res.status(409).json({ message: 'Ce véhicule n’est pas archivé', statusCode: 409 });
+    }
+
+    const updated = await prisma.vehicle.update({
+      where: { id },
+      // Le motif est conservé : il raconte pourquoi on l'avait mis de côté.
+      data: { archivedAt: null },
+    });
+
+    req.audit({ action: 'UPDATE', resource: 'vehicles', resourceId: id, before, after: updated });
+    return res.status(200).json(enrichVehicle(updated));
+  } catch (err) {
+    console.error('[vehicles.desarchiver]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });

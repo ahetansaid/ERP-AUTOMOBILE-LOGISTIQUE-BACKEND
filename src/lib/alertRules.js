@@ -16,6 +16,7 @@
 
 const { prisma } = require('./prisma');
 const { COST_NATURES } = require('./ledger');
+const { NON_ARCHIVES } = require('./archive');
 
 const num = (v) => (v == null ? 0 : Number(v));
 const daysBetween = (a, b) => Math.floor((a - b) / 86400000);
@@ -27,7 +28,7 @@ async function vehiculeDormant({ jours = 60 } = {}) {
   limite.setDate(limite.getDate() - jours);
 
   const vehicules = await prisma.vehicle.findMany({
-    where: { status: { in: ['DISPONIBLE', 'EN_VENTE'] }, createdAt: { lt: limite } },
+    where: { ...NON_ARCHIVES, status: { in: ['DISPONIBLE', 'EN_VENTE'] }, createdAt: { lt: limite } },
     select: { id: true, vin: true, brand: true, model: true, year: true, createdAt: true },
     take: 200,
   });
@@ -47,7 +48,7 @@ async function vehiculeDormant({ jours = 60 } = {}) {
 
 async function vehiculeSansPrixVente() {
   const vehicules = await prisma.vehicle.findMany({
-    where: { status: 'VENDU', OR: [{ priceSale: null }, { priceSale: 0 }] },
+    where: { ...NON_ARCHIVES, status: 'VENDU', OR: [{ priceSale: null }, { priceSale: 0 }] },
     select: { id: true, vin: true, brand: true, model: true },
     take: 200,
   });
@@ -66,7 +67,7 @@ async function vehiculeSansPrixVente() {
  */
 async function coutDeRevientIncomplet() {
   const vehicules = await prisma.vehicle.findMany({
-    where: { status: { not: 'EN_TRANSIT' } },
+    where: { ...NON_ARCHIVES, status: { not: 'EN_TRANSIT' } },
     select: { id: true, vin: true, brand: true, model: true },
     take: 300,
   });

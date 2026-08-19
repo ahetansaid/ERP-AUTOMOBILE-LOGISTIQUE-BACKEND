@@ -1,6 +1,7 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { authorize } = require('../middleware/rbac');
+const { NON_ARCHIVES } = require('../lib/archive');
 
 const router = express.Router();
 
@@ -224,6 +225,7 @@ router.get('/stock-value', authorize('reports', 'read'), async (req, res) => {
     const vehicles = await prisma.vehicle.findMany({
       where: {
         ...where,
+        ...NON_ARCHIVES,
         status: { in: ['DISPONIBLE', 'EN_MAINTENANCE', 'EN_TRANSIT', 'EN_VENTE', 'RESERVE'] },
       },
       select: {

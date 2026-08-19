@@ -3,6 +3,7 @@ const { prisma } = require('../lib/prisma');
 
 const router = express.Router();
 const { authorize } = require('../middleware/rbac');
+const { NON_ARCHIVES } = require('../lib/archive');
 
 // Minuit il y a N jours (équivalent DATE_SUB(CURDATE(), INTERVAL N DAY)).
 function midnightDaysAgo(n) {
@@ -19,8 +20,10 @@ router.get('/stats', authorize('dashboard', 'read'), async (req, res) => {
     const vehicleWhere = companyId ? { companyId } : {};
     const receiptWhere = companyId ? { companyId } : {};
 
+    // Les archivés sortent du parc visible : le tableau de bord est une vue
+    // d'inventaire, pas une vue comptable.
     const countVehicles = (status) =>
-      prisma.vehicle.count({ where: { ...vehicleWhere, status } });
+      prisma.vehicle.count({ where: { ...vehicleWhere, ...NON_ARCHIVES, status } });
 
     const [
       stockDisp,
