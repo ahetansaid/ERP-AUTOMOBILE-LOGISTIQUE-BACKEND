@@ -32,6 +32,7 @@ const cronRoutes = require('./routes/cron');
 const { authMiddleware, downloadTokenBridge } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
+const { csrfProtection } = require('./middleware/csrf');
 const { withContext } = require('./lib/context');
 const { logger } = require('./lib/logger');
 
@@ -82,6 +83,11 @@ app.use(attachAudit);
 // Avant les routes gardées : seule cette passerelle accepte un jeton en query
 // string, et uniquement sur les URL de téléchargement.
 app.use(downloadTokenBridge);
+
+// Falsification de requête entre sites. N'existe que depuis le passage aux
+// cookies : un jeton `Bearer` n'est jamais envoyé seul par le navigateur.
+// Même liste d'origines que CORS — une seule source de vérité.
+app.use(csrfProtection(allowedOrigins));
 
 // Rate limiting agressif sur l'authentification (anti brute-force / credential stuffing).
 const authLimiter = rateLimit({
@@ -146,6 +152,26 @@ app.get('/health', (req, res) => {
 // qui permet, à partir d'une capture d'écran, de retrouver la requête, ses
 // écritures et son journal d'audit — tous portent le même identifiant.
 app.use((err, req, res, next) => {
+  /*
+   * Un refus CORS n'est pas une panne.
+   *
+   * Le rappel d'origine lève une Error, qui remontait ici et devenait un 500 :
+   * les journaux se remplissaient de fausses erreurs serveur, et l'appelant
+   * recevait un message qui ne disait pas ce qui n'allait pas. Une origine non
+   * autorisée est un refus — 403 — et il se journalise en avertissement.
+   */
+  if (/Origine non autorisée par CORS/.test(err?.message || '')) {
+    log.warn('origine refusée', {
+      origine: req.headers.origin ?? null,
+      method: req.method,
+      path: req.path,
+    });
+    return res.status(403).json({
+      message: 'Origine non autorisée',
+      statusCode: 403,
+    });
+  }
+
   log.error('requête en échec', {
     err,
     method: req.method,

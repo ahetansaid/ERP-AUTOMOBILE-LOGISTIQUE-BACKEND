@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { lireCookies, ACCES } = require('../lib/cookies');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'refresh-change-me';
@@ -48,15 +49,30 @@ function authMiddleware(req, res, next) {
   // jeton volontairement plus étroit. On ne repasse pas dessus.
   if (req.user && req.isDownloadToken) return next();
 
+  /*
+   * Deux sources, dans cet ordre.
+   *
+   * L'en-tête d'abord : c'est le mode des clients non-navigateur, et il reste
+   * la référence. Le cookie ensuite : posé `httpOnly` à la connexion, il est
+   * illisible par script — c'est ce qui rend le vol de jeton sans objet même
+   * si une injection parvenait à s'exécuter.
+   *
+   * Accepter les deux permet de migrer le front sans coupure. Le jour où il ne
+   * pose plus d'en-tête, rien à changer ici.
+   */
   const entete = req.headers.authorization;
-  if (!entete || !entete.startsWith('Bearer ')) {
+  const parEntete = entete && entete.startsWith('Bearer ') ? entete.slice(7) : null;
+  const parCookie = parEntete ? null : lireCookies(req)[ACCES] || null;
+  const brut = parEntete || parCookie;
+
+  if (!brut) {
     return res
       .status(401)
       .json({ message: 'Token manquant ou invalide', statusCode: 401 });
   }
 
   try {
-    const decoded = jwt.verify(entete.slice(7), JWT_SECRET);
+    const decoded = jwt.verify(brut, JWT_SECRET);
 
     // Un jeton de téléchargement ne vaut pas jeton de session : il est
     // volontairement plus faible, il ne doit pas servir à appeler l'API.

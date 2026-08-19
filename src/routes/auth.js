@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 // savoir à quelle société il appartient — le filtre société ne peut donc pas
 // s'appliquer ici. Toute autre route doit utiliser le client `prisma` étendu.
 const { prismaRaw: prisma } = require('../lib/prisma');
+const { poserSession, effacerSession, lireCookies, RAFRAICHISSEMENT } = require('../lib/cookies');
 const { sendMail } = require('../lib/mailer');
 const {
   generateSecret,
@@ -84,7 +85,12 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    return res.status(200).json(issueTokens(user));
+    const session = issueTokens(user);
+    // Les cookies sont posés EN PLUS du corps de réponse. Le front lit encore
+    // les jetons ; le jour où il ne les lira plus, seule cette ligne restera
+    // utile. Migrer en deux temps évite de déconnecter tout le monde.
+    poserSession(res, session);
+    return res.status(200).json(session);
   } catch (err) {
     console.error('[login]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
@@ -124,7 +130,9 @@ router.post('/2fa/verify', async (req, res) => {
     if (!verifyToken(code, user.twoFaSecret)) {
       return res.status(401).json({ message: 'Code incorrect', statusCode: 401 });
     }
-    return res.status(200).json(issueTokens(user));
+    const session2 = issueTokens(user);
+    poserSession(res, session2);
+    return res.status(200).json(session2);
   } catch (err) {
     console.error('[2fa.verify]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
@@ -242,7 +250,10 @@ router.get('/2fa/status', authMiddleware, async (req, res) => {
 
 router.post('/refresh', async (req, res) => {
   try {
-    const { refreshToken } = req.body || {};
+    // Le corps d'abord — c'est le mode historique — puis le cookie, qu'un
+    // navigateur envoie tout seul et qu'aucun script ne peut lire.
+    const refreshToken =
+      (req.body || {}).refreshToken || lireCookies(req)[RAFRAICHISSEMENT] || null;
     if (!refreshToken) {
       return res.status(400).json({ message: 'refreshToken requis', statusCode: 400 });
     }
@@ -260,6 +271,8 @@ router.post('/refresh', async (req, res) => {
     const payload = { id: user.id, email: user.email, role: user.role, companyId: user.companyId };
     const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: EXPIRES_IN });
     const expiresInSeconds = 30 * 60;
+    // Le cookie d'accès est renouvelé ; celui de rafraîchissement ne bouge pas.
+    poserSession(res, { accessToken });
     return res.status(200).json({ accessToken, expiresIn: expiresInSeconds });
   } catch (err) {
     if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -271,6 +284,10 @@ router.post('/refresh', async (req, res) => {
 });
 
 router.post('/logout', (req, res) => {
+  // Les attributs doivent être identiques à la pose, sinon le navigateur crée
+  // un second cookie au lieu de remplacer le premier — et la déconnexion ne
+  // déconnecte rien.
+  effacerSession(res);
   res.status(200).json({ message: 'Déconnexion réussie' });
 });
 
