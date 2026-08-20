@@ -3,6 +3,8 @@ const { prisma } = require('../lib/prisma');
 const { authorize } = require('../middleware/rbac');
 const { upsertTransportForVehicle } = require('../services/treasuryTransactions');
 const { NON_ARCHIVES, ARCHIVES } = require('../lib/archive');
+const { analyser, serialiser, entetesTelechargement } = require('../lib/csv');
+const importVehicules = require('../lib/importVehicules');
 
 const router = express.Router();
 
@@ -188,6 +190,57 @@ router.get('/', authorize('vehicles', 'read'), async (req, res) => {
 });
 
 // GET /vehicles/:id
+/**
+ * GET /vehicles/export — le parc en CSV.
+ *
+ * Le fichier produit est AUSSI le modèle d'import : mêmes colonnes, même ordre.
+ * On exporte, on modifie dans Excel, on réimporte. Aucun format à apprendre, et
+ * aucune documentation à tenir à jour puisque c'est le code qui la porte.
+ *
+ * `?modele=1` renvoie les seules en-têtes, pour partir d'un fichier vide.
+ */
+router.get('/export', authorize('vehicles', 'read'), async (req, res) => {
+  try {
+    const modele = String(req.query.modele || '') === '1';
+    const vueArchives = String(req.query.archives || '') === '1';
+
+    const lignes = modele
+      ? []
+      : (
+          await prisma.vehicle.findMany({
+            where: {
+              ...req.tenantWhere(),
+              ...(vueArchives ? ARCHIVES : NON_ARCHIVES),
+            },
+            include: { purchaseVehicles: { include: { purchase: true } } },
+            orderBy: { id: 'asc' },
+          })
+        ).map((v) => ({
+          chassis: v.vin ?? '',
+          marque: v.brand ?? '',
+          modele: v.model ?? '',
+          annee: v.year ?? '',
+          couleur: v.color ?? '',
+          statut: v.status,
+          prix_achat_devise: v.purchasePrice != null ? Number(v.purchasePrice) : '',
+          prix_achat_fcfa: v.purchasePriceFcfa != null ? Number(v.purchasePriceFcfa) : '',
+          prix_vente: v.priceSale != null ? Number(v.priceSale) : '',
+          kilometrage: v.mileage ?? '',
+          immatriculation: v.registration ?? '',
+          pays_origine: v.countryOrigin ?? '',
+          poids_kg: v.weightKg ?? '',
+          conteneur: v.purchaseVehicles?.[0]?.purchase?.containerReference ?? '',
+        }));
+
+    const jour = new Date().toISOString().slice(0, 10);
+    entetesTelechargement(res, modele ? 'modele-vehicules.csv' : `vehicules-${jour}.csv`);
+    return res.send(serialiser(lignes, importVehicules.COLONNES));
+  } catch (err) {
+    console.error('[vehicles.export]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
 router.get('/:id', authorize('vehicles', 'read'), async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -563,6 +616,133 @@ router.post('/:id/desarchiver', authorize('vehicles', 'update'), async (req, res
     return res.status(200).json(enrichVehicle(updated));
   } catch (err) {
     console.error('[vehicles.desarchiver]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+/**
+ * POST /vehicles — créer un véhicule.
+ *
+ * Cette route n'existait pas : jusqu'ici un véhicule ne pouvait entrer que par
+ * le script de reprise. Un conteneur qui arrivait ne pouvait pas être saisi.
+ */
+router.post('/', authorize('vehicles', 'create'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const chassis = String(b.vin ?? b.chassis ?? '').trim().toUpperCase();
+    if (chassis.length < 11) {
+      return res.status(400).json({
+        message: 'Châssis requis, 11 caractères minimum.',
+        statusCode: 400,
+      });
+    }
+    const deja = await prisma.vehicle.findFirst({
+      where: { vin: chassis, ...req.tenantWhere() },
+    });
+    if (deja) {
+      // 409 et non 400 : la demande est valide, c'est l'état qui s'y oppose.
+      return res.status(409).json({
+        message: `Le châssis ${chassis} est déjà dans le parc (véhicule ${deja.id}).`,
+        statusCode: 409,
+      });
+    }
+
+    const { valides, refus } = await importVehicules.preparer(
+      [{ ...b, chassis, __ligne: 1 }],
+      req.tenantWhere()
+    );
+    if (refus.length) {
+      return res.status(400).json({
+        message: refus[0].erreurs.join(' ; '),
+        statusCode: 400,
+      });
+    }
+
+    const [cree] = await importVehicules.ecrire(valides, req.audit);
+    const v = await prisma.vehicle.findFirst({ where: { id: cree.id } });
+    return res.status(201).json(enrichVehicle(v));
+  } catch (err) {
+    console.error('[vehicles.create]', err);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+
+/**
+ * POST /vehicles/import — création en masse depuis un CSV.
+ *
+ * Body : { csv: "<contenu>" }  ou  multipart avec un champ `file`.
+ * Query : `?valider=1` pour écrire réellement.
+ *
+ * À BLANC PAR DÉFAUT, et ce n'est pas une politesse : un châssis créé en double
+ * ou rattaché au mauvais conteneur se répare ligne par ligne, et si des coûts
+ * ont déjà été ventilés dessus, ils sont au grand livre — donc définitifs.
+ */
+router.post('/import', authorize('vehicles', 'create'), async (req, res) => {
+  try {
+    const contenu = req.file?.buffer
+      ? req.file.buffer.toString('utf8')
+      : String((req.body || {}).csv || '');
+    if (!contenu.trim()) {
+      return res.status(400).json({
+        message: 'Aucun contenu CSV reçu (champ « csv » ou fichier « file »).',
+        statusCode: 400,
+      });
+    }
+
+    const { entetes, lignes } = analyser(contenu);
+    if (!lignes.length) {
+      return res.status(400).json({
+        message: 'Le fichier ne contient aucune ligne de données.',
+        statusCode: 400,
+        entetesLues: entetes,
+      });
+    }
+
+    const manquantes = ['chassis'].filter((c) => !entetes.includes(c));
+    if (manquantes.length) {
+      return res.status(400).json({
+        message:
+          `Colonne obligatoire absente : ${manquantes.join(', ')}. ` +
+          `Colonnes attendues : ${importVehicules.COLONNES.join(', ')}.`,
+        statusCode: 400,
+        entetesLues: entetes,
+      });
+    }
+
+    const { valides, refus } = await importVehicules.preparer(lignes, req.tenantWhere());
+    const valider = String(req.query.valider || '') === '1';
+
+    if (!valider) {
+      return res.status(200).json({
+        mode: 'a-blanc',
+        message:
+          `${valides.length} véhicule(s) seraient créés, ${refus.length} refusé(s). ` +
+          'Rien n’a été écrit. Relancez avec ?valider=1 pour appliquer.',
+        lus: lignes.length,
+        creables: valides.length,
+        refuses: refus.length,
+        apercu: valides.slice(0, 10).map((v) => ({
+          ligne: v.ligne,
+          chassis: v.data.vin,
+          vehicule: [v.data.brand, v.data.model].filter(Boolean).join(' '),
+          conteneur: v.refConteneur,
+        })),
+        refus,
+      });
+    }
+
+    const crees = await importVehicules.ecrire(valides, req.audit);
+    return res.status(201).json({
+      mode: 'applique',
+      message: `${crees.length} véhicule(s) créé(s), ${refus.length} refusé(s).`,
+      lus: lignes.length,
+      crees,
+      refuses: refus.length,
+      refus,
+    });
+  } catch (err) {
+    console.error('[vehicles.import]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });
