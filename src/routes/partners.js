@@ -12,6 +12,7 @@ const {
   slugify, findOrCreatePartner, suggestMerges, mergePartners,
 } = require('../lib/partners');
 const { authorize } = require('../middleware/rbac');
+const { monterImportExport } = require('../lib/importExport');
 
 const router = express.Router();
 
@@ -227,6 +228,102 @@ router.post('/:id/merge', authorize('clients', 'update'), async (req, res) => {
     console.error('[partners.merge]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
+});
+
+/* ── Export et import en masse ───────────────────────────────────────────── */
+
+const COLONNES_TIERS = ['nom', 'roles', 'metier', 'telephone', 'email', 'ville', 'pays', 'numero_legal', 'notes'];
+
+async function preparerTiers(lignes, tenantWhere) {
+  const refus = [];
+  const valides = [];
+
+  const slugs = lignes.map((l) => slugify(String(l.nom || ''))).filter(Boolean);
+  const existants = new Set(
+    (
+      await prisma.partner.findMany({ where: { ...tenantWhere, slug: { in: slugs } }, select: { slug: true } })
+    ).map((p) => p.slug)
+  );
+  const vus = new Map();
+
+  for (const l of lignes) {
+    const erreurs = [];
+    const nom = String(l.nom || '').trim();
+    const slug = slugify(nom);
+
+    if (!nom) erreurs.push('nom absent');
+    else if (!slug) erreurs.push(`« ${nom} » ne produit aucun identifiant exploitable`);
+    else if (existants.has(slug)) {
+      // Le rapprochement des graphies est ce qui a fusionné « ALI » et
+      // « ALI (Electricien) » lors de la reprise. Ici on REFUSE plutôt que de
+      // fusionner en silence : deux personnes peuvent porter le même nom.
+      erreurs.push(`un tiers de même identifiant existe déjà (« ${slug} »)`);
+    } else if (vus.has(slug)) {
+      erreurs.push(`identifiant « ${slug} » déjà présent ligne ${vus.get(slug)} du fichier`);
+    }
+
+    const roles = String(l.roles || 'PRESTATAIRE')
+      .split(/[,;|]/)
+      .map((r) => r.trim().toUpperCase())
+      .filter(Boolean);
+    const inconnus = roles.filter((r) => !KINDS.includes(r));
+    if (inconnus.length) {
+      erreurs.push(`rôle inconnu : ${inconnus.join(', ')}. Valeurs : ${KINDS.join(', ')}`);
+    }
+
+    const email = String(l.email || '').trim();
+    if (email && !email.includes('@')) erreurs.push(`email sans arobase : « ${email} »`);
+
+    if (erreurs.length) {
+      refus.push({ ligne: l.__ligne, nom: nom || null, erreurs });
+      continue;
+    }
+    vus.set(slug, l.__ligne);
+
+    valides.push({
+      ligne: l.__ligne,
+      apercu: { nom, roles: roles.join(', '), metier: String(l.metier || '').trim() || null },
+      data: {
+        name: nom.slice(0, 255),
+        slug,
+        kinds: roles,
+        specialty: String(l.metier || '').trim().slice(0, 120) || guessSpecialty(nom),
+        phone: String(l.telephone || '').trim().slice(0, 50) || null,
+        email: email.slice(0, 255) || null,
+        city: String(l.ville || '').trim().slice(0, 100) || null,
+        country: String(l.pays || '').trim().slice(0, 100) || null,
+        legalNumber: String(l.numero_legal || '').trim().slice(0, 100) || null,
+        notes: String(l.notes || '').trim() || null,
+      },
+    });
+  }
+  return { valides, refus };
+}
+
+monterImportExport(router, {
+  authorize,
+  module: 'clients',
+  nom: 'tiers',
+  colonnes: COLONNES_TIERS,
+  obligatoires: ['nom'],
+  exporter: async (req) =>
+    (
+      await prisma.partner.findMany({ where: { ...req.tenantWhere() }, orderBy: { name: 'asc' }, take: 10000 })
+    ).map((p) => ({
+      nom: p.name, roles: (p.kinds || []).join(', '), metier: p.specialty ?? '',
+      telephone: p.phone ?? '', email: p.email ?? '', ville: p.city ?? '',
+      pays: p.country ?? '', numero_legal: p.legalNumber ?? '', notes: p.notes ?? '',
+    })),
+  preparer: preparerTiers,
+  ecrire: async (valides, req) => {
+    const crees = [];
+    for (const v of valides) {
+      const t = await prisma.partner.create({ data: v.data });
+      if (req?.audit) req.audit({ action: 'CREATE', resource: 'partners', resourceId: t.id, before: null, after: t });
+      crees.push({ ligne: v.ligne, id: t.id, nom: t.name });
+    }
+    return crees;
+  },
 });
 
 module.exports = router;

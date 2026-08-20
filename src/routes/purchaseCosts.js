@@ -13,6 +13,8 @@ const {
   allocate, unallocate, reallocatePurchase, computeShares, LABELS,
 } = require('../lib/allocation');
 const { authorize } = require('../middleware/rbac');
+const { monterImportExport } = require('../lib/importExport');
+const { montant: lireMontant, date: lireDate } = require('../lib/importCaisse');
 
 const router = express.Router();
 
@@ -225,6 +227,152 @@ router.post('/dossier/:purchaseId/rejouer', authorize('purchases', 'update'), as
     console.error('[frais.rejouer]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
+});
+
+/* ── Export et import en masse ─────────────────────────────────────────────
+ *
+ * Un conteneur arrive avec ses frais : fret, dépotage, main d'œuvre, commission.
+ * Les saisir un par un pour quinze conteneurs est le genre de tâche qu'on
+ * repousse — et des frais non saisis sont un coût de revient faux.
+ *
+ * Le frais est créé NON VENTILÉ. La répartition reste un geste explicite
+ * (POST /:id/repartir) : elle écrit au grand livre, et ce qui écrit au grand
+ * livre ne se déclenche pas par effet de bord d'un import.
+ */
+
+const COLONNES_FRAIS = ['conteneur', 'type', 'libelle', 'montant', 'devise', 'taux', 'date', 'repartition'];
+
+async function preparerFrais(lignes, tenantWhere) {
+  const refus = [];
+  const valides = [];
+
+  const refs = [...new Set(lignes.map((l) => String(l.conteneur || '').trim()).filter(Boolean))];
+  const conteneurs = new Map(
+    (
+      await prisma.purchase.findMany({
+        where: { ...tenantWhere, containerReference: { in: refs } },
+        select: { id: true, containerReference: true },
+      })
+    ).map((p) => [p.containerReference, p.id])
+  );
+
+  for (const l of lignes) {
+    const erreurs = [];
+
+    const ref = String(l.conteneur || '').trim();
+    const purchaseId = ref ? conteneurs.get(ref) ?? null : null;
+    if (!ref) erreurs.push('conteneur absent');
+    else if (!purchaseId) erreurs.push(`conteneur « ${ref} » introuvable — créez-le d'abord`);
+
+    const type = String(l.type || '').trim().toUpperCase();
+    if (!type) erreurs.push('type absent');
+    else if (!TYPES.includes(type)) {
+      erreurs.push(`type inconnu : « ${l.type} ». Valeurs : ${TYPES.join(', ')}`);
+    }
+
+    const mode = String(l.repartition || 'PAR_VEHICULE').trim().toUpperCase();
+    if (!MODES.includes(mode)) {
+      erreurs.push(`répartition inconnue : « ${l.repartition} ». Valeurs : ${MODES.join(', ')}`);
+    }
+
+    const m = lireMontant(l.montant);
+    if (m === null) erreurs.push('montant absent');
+    else if (Number.isNaN(m)) erreurs.push(`montant illisible : « ${l.montant} »`);
+    else if (m <= 0) erreurs.push('montant nul ou négatif — un frais est une dépense positive');
+
+    const devise = (String(l.devise || 'FCFA').trim().toUpperCase()) || 'FCFA';
+    const taux = lireMontant(l.taux);
+    if (Number.isNaN(taux)) erreurs.push(`taux illisible : « ${l.taux} »`);
+    // Une devise étrangère sans taux ne peut pas être convertie, et deviner
+    // reviendrait à inventer un coût de revient.
+    if (devise !== 'FCFA' && devise !== 'XOF' && devise !== 'EUR' && !taux) {
+      erreurs.push(`taux requis pour la devise ${devise}`);
+    }
+
+    const d = lireDate(l.date);
+    if (d !== null && Number.isNaN(d)) {
+      erreurs.push(`date illisible : « ${l.date} » (JJ/MM/AAAA attendu)`);
+    }
+
+    if (erreurs.length) {
+      refus.push({ ligne: l.__ligne, conteneur: ref || null, erreurs });
+      continue;
+    }
+
+    valides.push({
+      ligne: l.__ligne,
+      apercu: { conteneur: ref, type, montant: m, devise, repartition: mode },
+      corps: {
+        purchaseId,
+        type,
+        libelle: String(l.libelle || '').trim() || null,
+        montant: m,
+        devise,
+        taux: taux || null,
+        date: d || undefined,
+        repartition: mode,
+      },
+    });
+  }
+
+  return { valides, refus };
+}
+
+async function ecrireFrais(valides, req) {
+  const crees = [];
+  for (const v of valides) {
+    const c = v.corps;
+    const cout = await prisma.purchaseCost.create({
+      data: {
+        purchaseId: c.purchaseId,
+        type: c.type,
+        label: c.libelle,
+        amount: c.montant,
+        currency: c.devise,
+        rateApplied: c.taux,
+        amountFcfa: c.devise === 'FCFA' || c.devise === 'XOF'
+          ? c.montant
+          : c.montant * (c.taux || 1),
+        allocation: c.repartition,
+        costDate: c.date ?? new Date(),
+      },
+    });
+    if (req?.audit) {
+      req.audit({ action: 'CREATE', resource: 'purchase_costs', resourceId: cout.id, before: null, after: cout });
+    }
+    crees.push({ ligne: v.ligne, id: cout.id, conteneur: v.apercu.conteneur });
+  }
+  return crees;
+}
+
+async function exporterFrais(req) {
+  const rows = await prisma.purchaseCost.findMany({
+    where: { ...req.tenantWhere() },
+    include: { purchase: true },
+    orderBy: { id: 'asc' },
+    take: 10000,
+  });
+  return rows.map((c) => ({
+    conteneur: c.purchase?.containerReference ?? '',
+    type: c.type,
+    libelle: c.label ?? '',
+    montant: Number(c.amount),
+    devise: c.currency,
+    taux: c.rateApplied != null ? Number(c.rateApplied) : '',
+    date: c.costDate ? c.costDate.toISOString().slice(0, 10) : '',
+    repartition: c.allocation,
+  }));
+}
+
+monterImportExport(router, {
+  authorize,
+  module: 'purchases',
+  nom: 'frais-conteneur',
+  colonnes: COLONNES_FRAIS,
+  obligatoires: ['conteneur', 'type', 'montant'],
+  exporter: exporterFrais,
+  preparer: preparerFrais,
+  ecrire: ecrireFrais,
 });
 
 module.exports = router;

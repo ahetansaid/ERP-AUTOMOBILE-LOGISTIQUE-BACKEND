@@ -1,6 +1,7 @@
 const express = require('express');
 const { prisma } = require('../lib/prisma');
 const { authorize } = require('../middleware/rbac');
+const { monterImportExport } = require('../lib/importExport');
 
 const router = express.Router();
 
@@ -264,6 +265,94 @@ router.delete('/:id', authorize('clients', 'delete'), async (req, res) => {
     console.error('[clients.delete]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
+});
+
+/* ── Export et import en masse ───────────────────────────────────────────── */
+
+const COLONNES_CLIENTS = ['nom', 'contact', 'email', 'telephone', 'ville', 'pays', 'adresse', 'statut', 'notes'];
+
+async function preparerClients(lignes, tenantWhere) {
+  const refus = [];
+  const valides = [];
+
+  const noms = [...new Set(lignes.map((l) => String(l.nom || '').trim()).filter(Boolean))];
+  const existants = new Set(
+    (
+      await prisma.client.findMany({ where: { ...tenantWhere, name: { in: noms } }, select: { name: true } })
+    ).map((c) => c.name.toLowerCase())
+  );
+  const vus = new Map();
+
+  for (const l of lignes) {
+    const erreurs = [];
+    const nom = String(l.nom || '').trim();
+
+    if (!nom) erreurs.push('nom absent');
+    else if (existants.has(nom.toLowerCase())) erreurs.push(`« ${nom} » existe déjà`);
+    else if (vus.has(nom.toLowerCase())) {
+      erreurs.push(`« ${nom} » déjà présent ligne ${vus.get(nom.toLowerCase())} du fichier`);
+    }
+
+    const email = String(l.email || '').trim();
+    // Contrôle volontairement minimal : refuser une adresse exotique mais
+    // valide serait plus coûteux que de laisser passer une faute de frappe,
+    // qui se voit à l'usage.
+    if (email && !email.includes('@')) erreurs.push(`email sans arobase : « ${email} »`);
+
+    const statut = String(l.statut || 'ACTIF').trim().toUpperCase();
+    if (!['ACTIF', 'INACTIF'].includes(statut)) {
+      erreurs.push(`statut inconnu : « ${l.statut} ». Valeurs : ACTIF, INACTIF`);
+    }
+
+    if (erreurs.length) {
+      refus.push({ ligne: l.__ligne, nom: nom || null, erreurs });
+      continue;
+    }
+    vus.set(nom.toLowerCase(), l.__ligne);
+
+    valides.push({
+      ligne: l.__ligne,
+      apercu: { nom, ville: String(l.ville || '').trim() || null, statut },
+      data: {
+        name: nom.slice(0, 255),
+        contactName: String(l.contact || '').trim().slice(0, 255) || null,
+        email: email.slice(0, 255) || null,
+        phone: String(l.telephone || '').trim().slice(0, 50) || null,
+        city: String(l.ville || '').trim().slice(0, 100) || null,
+        country: String(l.pays || '').trim().slice(0, 100) || null,
+        address: String(l.adresse || '').trim() || null,
+        notes: String(l.notes || '').trim() || null,
+        status: statut,
+      },
+    });
+  }
+  return { valides, refus };
+}
+
+monterImportExport(router, {
+  authorize,
+  module: 'clients',
+  nom: 'clients',
+  colonnes: COLONNES_CLIENTS,
+  obligatoires: ['nom'],
+  exporter: async (req) =>
+    (
+      await prisma.client.findMany({ where: { ...req.tenantWhere() }, orderBy: { id: 'asc' }, take: 10000 })
+    ).map((c) => ({
+      nom: c.name, contact: c.contactName ?? '', email: c.email ?? '',
+      telephone: c.phone ?? '', ville: c.city ?? '', pays: c.country ?? '',
+      adresse: c.address ?? '', statut: c.status, notes: c.notes ?? '',
+    })),
+  preparer: preparerClients,
+  ecrire: async (valides, req) => {
+    const crees = [];
+    for (const v of valides) {
+      const c = await prisma.client.create({ data: v.data });
+      if (req?.audit) req.audit({ action: 'CREATE', resource: 'clients', resourceId: c.id, before: null, after: c });
+      crees.push({ ligne: v.ligne, id: c.id, nom: c.name });
+    }
+    return crees;
+  },
 });
 
 module.exports = router;
