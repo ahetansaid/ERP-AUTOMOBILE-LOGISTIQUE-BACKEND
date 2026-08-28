@@ -188,14 +188,21 @@ router.get('/alerts', authorize('dashboard', 'read'), async (req, res) => {
       });
     }
 
-    // 4. Véhicules en maintenance depuis > 14 jours
-    const stuckMaintenance = await prisma.vehicle.count({
+    // 4. Véhicules en atelier depuis > 14 jours
+    //
+    // « En atelier » se déduit d'un devis encore ouvert, plus d'un statut de
+    // véhicule : un véhicule vendu puis renvoyé chez le tôlier devrait sinon
+    // porter VENDU et EN_MAINTENANCE en même temps, ce qu'un champ unique ne
+    // permet pas. Le statut reste l'état COMMERCIAL, l'atelier est un fait.
+    const enAtelier = await prisma.workshopQuote.findMany({
       where: {
         ...tenantWhere,
-        status: 'EN_MAINTENANCE',
-        updatedAt: { lt: D_14 },
+        status: { in: ['APPROUVE', 'EN_COURS'] },
+        createdAt: { lt: D_14 },
       },
+      select: { vehicleId: true },
     });
+    const stuckMaintenance = new Set(enAtelier.map((q) => q.vehicleId)).size;
     if (stuckMaintenance > 0) {
       alerts.push({
         id: 'maintenance_stuck',

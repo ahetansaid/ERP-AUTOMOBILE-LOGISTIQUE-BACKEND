@@ -17,6 +17,7 @@ const treasuryRoutes = require('./routes/treasury');
 const proformasRoutes = require('./routes/proformas');
 const reportsRoutes = require('./routes/reports');
 const transitRoutes = require('./routes/transit');
+const sortiesRoutes = require('./routes/sorties');
 const usersRoutes = require('./routes/users');
 const settingsRoutes = require('./routes/settings');
 const notificationsRoutes = require('./routes/notifications');
@@ -121,6 +122,7 @@ function mount(prefix) {
   app.use(`${prefix}/proformas`, ...guarded, proformasRoutes);
   app.use(`${prefix}/reports`, ...guarded, reportsRoutes);
   app.use(`${prefix}/transit`, ...guarded, transitRoutes);
+  app.use(`${prefix}/sorties`, ...guarded, sortiesRoutes);
   app.use(`${prefix}/users`, ...guarded, usersRoutes);
   app.use(`${prefix}/settings`, ...guarded, settingsRoutes);
   app.use(`${prefix}/notifications`, ...guarded, notificationsRoutes);

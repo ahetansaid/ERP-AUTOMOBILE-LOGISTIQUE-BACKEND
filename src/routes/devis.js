@@ -53,11 +53,12 @@ router.post('/', authorize('workshop_quotes', 'create'), async (req, res) => {
       select: { id: true },
     });
     if (!vehicle) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
-    const existing = await prisma.workshopQuote.findFirst({
-      where: { vehicleId: Number(b.vehicleId), status: { not: 'TERMINE' }, ...req.tenantWhere() },
-      select: { id: true },
-    });
-    if (existing) return res.status(409).json({ message: 'Devis actif existant', statusCode: 409 });
+    // Plusieurs devis ouverts sont la règle, pas l'exception : un véhicule passe
+    // chez le mécanicien, le tôlier, l'électricien et le peintre, chacun avec
+    // son devis et ses reçus. Le blocage « un seul devis actif » obligeait à
+    // clore un devis non payé pour en saisir un autre — donc à mentir sur ce
+    // qu'on devait. La cohérence est portée par la porte de sortie, qui refuse
+    // sans motif tant qu'un devis reste non soldé.
     const created = await prisma.workshopQuote.create({
       data: {
         companyId: req.companyId ?? null,
@@ -73,6 +74,96 @@ router.post('/', authorize('workshop_quotes', 'create'), async (req, res) => {
     return res.status(201).json(toSnake(created));
   } catch (e) {
     console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+/**
+ * PATCH /devis/:id — cycle de vie du devis.
+ *
+ * Il n'existait aucun moyen d'approuver un devis : il naissait EN_ATTENTE et
+ * ne bougeait qu'en étant payé. Un devis refusé restait donc éternellement en
+ * attente, et pesait sur la sortie d'atelier.
+ *
+ * TERMINE n'est pas proposé ici : il est POSÉ PAR LES REÇUS. Un devis est
+ * terminé quand le prestataire est payé, pas quand quelqu'un l'a décidé —
+ * l'autoriser à la main rouvrirait le trou que les reçus viennent de fermer.
+ */
+const TRANSITIONS = {
+  EN_ATTENTE: ['APPROUVE', 'REFUSE'],
+  APPROUVE: ['EN_COURS', 'REFUSE'],
+  EN_COURS: ['CLOTURE'],
+  CLOTURE: ['EN_COURS'],
+  REFUSE: [],
+  TERMINE: [],
+};
+
+router.patch('/:id', authorize('workshop_quotes', 'update'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+    const b = req.body || {};
+    const existing = await prisma.workshopQuote.findFirst({
+      where: { id, ...req.tenantWhere() },
+      select: { id: true, status: true, amount: true, closedAt: true },
+    });
+    if (!existing) return res.status(404).json({ message: 'Devis introuvable', statusCode: 404 });
+
+    const data = {};
+    const nouveauStatut = b.status ? String(b.status).trim().toUpperCase() : null;
+
+    if (nouveauStatut && nouveauStatut !== existing.status) {
+      const permises = TRANSITIONS[existing.status] ?? [];
+      if (!permises.includes(nouveauStatut)) {
+        return res.status(409).json({
+          message:
+            `Transition impossible : ${existing.status} → ${nouveauStatut}. ` +
+            (permises.length
+              ? `Depuis ${existing.status}, seul ${permises.join(' ou ')} est possible.`
+              : `${existing.status} est un état terminal.`) +
+            (nouveauStatut === 'TERMINE'
+              ? ' Un devis devient TERMINE en étant réglé, par l’émission des reçus.'
+              : ''),
+          statusCode: 409,
+        });
+      }
+      data.status = nouveauStatut;
+      if (nouveauStatut === 'CLOTURE') data.closedAt = existing.closedAt ?? new Date();
+      if (nouveauStatut === 'EN_COURS') data.closedAt = null;
+    }
+
+    // Le montant ne bouge plus dès qu'un reçu existe : il est le plafond des
+    // reçus déjà émis, et le baisser après coup rendrait le devis surpayé.
+    if (b.amount != null) {
+      const paid = await prisma.receipt.aggregate({
+        _sum: { amount: true },
+        where: { workshopQuoteId: id },
+      });
+      const regle = Number(paid._sum.amount ?? 0);
+      if (regle > 0) {
+        return res.status(409).json({
+          message:
+            `Un reçu de ${Math.round(regle).toLocaleString('fr-FR')} FCFA a déjà été émis sur ce devis. ` +
+            'Son montant ne peut plus être modifié — établissez un devis complémentaire.',
+          statusCode: 409,
+        });
+      }
+      data.amount = Number(b.amount);
+    }
+    if (b.description !== undefined) data.description = b.description || null;
+    if (b.prestataire !== undefined && b.prestataire) data.prestataire = b.prestataire;
+    if (b.validUntil !== undefined) data.validUntil = b.validUntil ? new Date(b.validUntil) : null;
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ message: 'Aucun champ à mettre à jour', statusCode: 400 });
+    }
+
+    const updated = await prisma.workshopQuote.update({ where: { id }, data });
+    return res.status(200).json(toSnake(updated));
+  } catch (e) {
+    console.error('[devis.patch]', e);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });

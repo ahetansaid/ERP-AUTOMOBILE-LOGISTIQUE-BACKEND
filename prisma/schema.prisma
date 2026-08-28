@@ -297,6 +297,7 @@ model Company {
   treasuryTxs      TreasuryTransaction[]
   auditLogs        AuditLog[]
   uploads          Upload[]
+  transitSteps     TransitStep[]
 
   @@map("companies")
 }
@@ -754,8 +755,13 @@ model Proforma {
 // TRANSIT
 // ============================================================================
 
+/// Chronologie d'un véhicule. Le nom dit « transit » pour raison d'histoire,
+/// mais la table porte désormais tous les jalons datés du véhicule : l'import
+/// (ARRIVEE_PORT … LIVRE) et les deux sorties (SORTIE_ATELIER,
+/// LIVRAISON_CLIENT). Une seule chronologie, un seul écran, un seul dossier.
 model TransitStep {
   id            Int       @id @default(autoincrement())
+  companyId     Int?      @map("company_id")
   vehicleId     Int?      @map("vehicle_id")
   // String (et non enum) : l'application utilise un jeu de valeurs d'étapes
   // (ARRIVEE_PORT, MAINLEVEE, ...) distinct de l'ancien enum. Postgres rejette
@@ -763,11 +769,25 @@ model TransitStep {
   stepName      String    @map("step_name") @db.VarChar(50)
   dateArrival   DateTime? @map("date_arrival") @db.Date
   dateDeparture DateTime? @map("date_departure") @db.Date
+
+  /// Numéro de la pièce qui atteste le jalon : bon de sortie d'atelier, bon de
+  /// livraison signé. Une étape sans sa pièce est déclarée, pas prouvée.
+  docRef        String?   @map("doc_ref") @db.VarChar(100)
+  /// Solde restant AU MOMENT du franchissement, figé. Recalculé plus tard il
+  /// vaudrait zéro, et l'on ne saurait plus qu'on a laissé partir un véhicule
+  /// à moitié payé. C'est la seule donnée ici qui se perd si on ne la fige pas.
+  soldeGele     Decimal?  @map("solde_gele") @db.Decimal(15, 2)
+  /// Obligatoire dès que `soldeGele` n'est pas nul : la porte s'ouvre toujours,
+  /// mais jamais en silence.
+  motif         String?   @db.VarChar(500)
+
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime? @updatedAt @map("updated_at")
 
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
   vehicle Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
+  @@index([companyId], map: "idx_transit_company")
   @@index([vehicleId], map: "idx_transit_vehicle")
   @@index([stepName], map: "idx_transit_step")
   @@map("transit_steps")

@@ -5,7 +5,17 @@ const { onReceiptInvoice, onReceiptWorkshopQuote } = require('../services/treasu
 const { notify } = require('../services/notifications');
 const { nextDocumentNumber } = require('../lib/numbering');
 const { authorize } = require('../middleware/rbac');
+const { recalerStatutFacture, recalerStatutDevis } = require('../lib/soldes');
 const router = express.Router();
+
+/**
+ * Après toute variation du montant réglé — création, correction, suppression —
+ * l'enveloppe concernée reprend le statut que ses reçus imposent.
+ */
+async function recalerApresMouvement({ invoiceId, workshopQuoteId }) {
+  if (invoiceId != null) await recalerStatutFacture(invoiceId);
+  if (workshopQuoteId != null) await recalerStatutDevis(workshopQuoteId);
+}
 
 function sortByDateThenId(a, b) {
   const da = a.paymentDate ? new Date(a.paymentDate).getTime() : 0;
@@ -23,6 +33,7 @@ router.get('/', authorize('receipts', 'read'), async (req, res) => {
         invoice: {
           select: {
             invoiceNumber: true,
+            totalAmount: true,
             client: { select: { name: true } },
             vehicle: { select: { priceSale: true } },
           },
@@ -37,7 +48,9 @@ router.get('/', authorize('receipts', 'read'), async (req, res) => {
       },
     });
 
-    // Soldes restants cumulés (par facture via prix de vente du véhicule, par devis via montant du devis)
+    // Soldes restants cumulés — sur le montant de la facture et sur le montant
+    // du devis. Le prix de vente du véhicule n'entre plus dans ce calcul : il
+    // reste modifiable, et l'y adosser déplaçait le solde dû après coup.
     const byInvoice = {};
     const byQuote = {};
     for (const r of rows) {
@@ -47,12 +60,13 @@ router.get('/', authorize('receipts', 'read'), async (req, res) => {
     const remainingByReceiptId = {};
     const priceSaleByReceiptId = {};
     for (const recs of Object.values(byInvoice)) {
+      const total = Number(recs[0].invoice?.totalAmount) || 0;
       const priceSale = Number(recs[0].invoice?.vehicle?.priceSale) || 0;
       const sorted = recs.slice().sort(sortByDateThenId);
       let cumulative = 0;
       for (const rec of sorted) {
         cumulative += Number(rec.amount) || 0;
-        remainingByReceiptId[rec.id] = Math.max(0, priceSale - cumulative);
+        remainingByReceiptId[rec.id] = Math.max(0, total - cumulative);
         priceSaleByReceiptId[rec.id] = priceSale;
       }
     }
@@ -248,24 +262,27 @@ router.post('/', authorize('receipts', 'create'), async (req, res) => {
           reference,
         },
       });
-      const totalPaidAfter = await sumReceipts({ workshopQuoteId: Number(devisId) });
-      if (totalPaidAfter >= devisAmount) {
-        await prisma.workshopQuote.update({
-          where: { id: Number(devisId) },
-          data: { status: 'TERMINE', closedAt: q.closedAt ?? new Date() },
-        });
-      }
+      await recalerStatutDevis(Number(devisId));
       if (created.id) await onReceiptWorkshopQuote(q.companyId, created.id, amount, paymentDate, reference, q.vehicleId, Number(devisId));
     } else {
       const inv = await prisma.invoice.findFirst({
         where: { id: Number(invoiceId), ...req.tenantWhere() },
-        select: { id: true, vehicleId: true, companyId: true, invoiceNumber: true, vehicle: { select: { priceSale: true } } },
+        select: { id: true, vehicleId: true, companyId: true, invoiceNumber: true, totalAmount: true, status: true },
       });
       if (!inv) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+      if (inv.status === 'ANNULEE') {
+        return res.status(409).json({
+          message: 'Cette facture est annulée. Aucun reçu ne peut y être rattaché.',
+          statusCode: 409,
+        });
+      }
       const vehicleId = inv.vehicleId;
-      const priceSale = Number(inv.vehicle?.priceSale) || 0;
+      // Plafond = montant de la facture. C'était le prix de vente du véhicule,
+      // qui rendait tout reçu impossible dès que ce prix était vide, et
+      // déplaçait le plafond dès qu'il changeait.
+      const totalFacture = Number(inv.totalAmount) || 0;
       const alreadyPaid = await sumReceipts({ invoiceId: Number(invoiceId) });
-      const remainingBefore = Math.max(0, priceSale - alreadyPaid);
+      const remainingBefore = Math.max(0, totalFacture - alreadyPaid);
       if (remainingBefore <= 0) {
         return res.status(409).json({
           message: 'La facture de ce véhicule est entièrement réglée. Aucun nouveau reçu ne peut être émis.',
@@ -294,6 +311,9 @@ router.post('/', authorize('receipts', 'create'), async (req, res) => {
       });
       const companyId = inv.companyId;
       if (created.id) await onReceiptInvoice(companyId, created.id, amount, paymentDate, reference, vehicleId);
+      // Le statut de la facture suit ses reçus. Il n'était posé que par un
+      // PATCH manuel : une facture intégralement réglée restait « émise ».
+      await recalerStatutFacture(Number(invoiceId));
       const invNumber = inv.invoiceNumber || `#${invoiceId}`;
       notify({
         companyId,
@@ -322,7 +342,10 @@ router.patch('/:id', authorize('receipts', 'update'), async (req, res) => {
     const paymentDate = paymentDateRaw != null && paymentDateRaw !== '' ? toDateOnly(paymentDateRaw) : undefined;
     const reference = body.reference !== undefined ? String(body.reference).trim() : undefined;
 
-    const existing = await prisma.receipt.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true } });
+    const existing = await prisma.receipt.findFirst({
+      where: { id, ...req.tenantWhere() },
+      select: { id: true, invoiceId: true, workshopQuoteId: true },
+    });
     if (!existing) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
 
     const data = {};
@@ -336,6 +359,8 @@ router.patch('/:id', authorize('receipts', 'update'), async (req, res) => {
       return res.status(200).json(toSnake(current));
     }
     const updated = await prisma.receipt.update({ where: { id }, data });
+    // Changer le montant change le solde, donc l'état de l'enveloppe.
+    await recalerApresMouvement(existing);
     return res.status(200).json(toSnake(updated));
   } catch (err) {
     console.error(err);
@@ -346,9 +371,16 @@ router.patch('/:id', authorize('receipts', 'update'), async (req, res) => {
 router.delete('/:id', authorize('receipts', 'delete'), async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const existing = await prisma.receipt.findFirst({ where: { id, ...req.tenantWhere() }, select: { id: true } });
+    const existing = await prisma.receipt.findFirst({
+      where: { id, ...req.tenantWhere() },
+      select: { id: true, invoiceId: true, workshopQuoteId: true },
+    });
     if (!existing) return res.status(404).json({ message: 'Reçu introuvable', statusCode: 404 });
     await prisma.receipt.delete({ where: { id } });
+    // Le reçu disparu, l'enveloppe se rouvre : facture repassée en partiellement
+    // payée, devis repassé en cours. L'écriture au grand livre, elle, reste —
+    // elle se contre-passe, elle ne s'efface pas.
+    await recalerApresMouvement(existing);
     return res.status(204).send();
   } catch (err) {
     console.error(err);

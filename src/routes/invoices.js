@@ -21,9 +21,12 @@ router.get('/', authorize('invoices', 'read'), async (req, res) => {
     });
     const out = rows.map((r) => {
       const paid = (r.receipts || []).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+      // Le solde se calcule sur le montant DE LA FACTURE, jamais sur le prix de
+      // vente du véhicule : celui-ci reste modifiable, et l'y adosser faisait
+      // varier rétroactivement ce que le client devait encore.
       const total = Number(r.totalAmount) || 0;
       const priceSale = Number(r.vehicle?.priceSale) || 0;
-      const remaining = Math.max(0, priceSale - paid);
+      const remaining = Math.max(0, total - paid);
       const { client, vehicle, receipts, ...rest } = r;
       return {
         ...toSnake(rest),
@@ -62,13 +65,14 @@ router.get('/:id', authorize('invoices', 'read'), async (req, res) => {
     if (!r) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
 
     const paid = (r.receipts || []).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const total = Number(r.totalAmount) || 0;
     const priceSale = Number(r.vehicle?.priceSale) || 0;
-    const remaining = Math.max(0, priceSale - paid);
+    const remaining = Math.max(0, total - paid);
 
     let cumulative = 0;
     const receipts = (r.receipts || []).map((rec) => {
       cumulative += Number(rec.amount) || 0;
-      const soldeApres = Math.max(0, priceSale - cumulative);
+      const soldeApres = Math.max(0, total - cumulative);
       return {
         id: rec.id,
         amount: Number(rec.amount),
@@ -86,8 +90,8 @@ router.get('/:id', authorize('invoices', 'read'), async (req, res) => {
       ...toSnake(rest),
       client_name: client?.name ?? null,
       vin: vehicle?.vin ?? null,
-      amount: Number(r.totalAmount) || 0,
-      total_amount: Number(r.totalAmount) || 0,
+      amount: total,
+      total_amount: total,
       paid_amount: paid,
       remaining_amount: remaining,
       price_sale: priceSale,
@@ -111,8 +115,9 @@ router.post('/', authorize('invoices', 'create'), async (req, res) => {
     if (!vehicleId || !clientId || amount == null) return res.status(400).json({ message: 'vehicleId, clientId et amount (ou total_amount) requis', statusCode: 400 });
 
     // Véhicule ET client doivent appartenir à la société courante.
-    const vehicle = await prisma.vehicle.findFirst({ where: { id: Number(vehicleId), ...req.tenantWhere() }, select: { priceSale: true } });
+    const vehicle = await prisma.vehicle.findFirst({ where: { id: Number(vehicleId), ...req.tenantWhere() }, select: { priceSale: true, status: true } });
     if (!vehicle) return res.status(404).json({ message: 'Véhicule introuvable', statusCode: 404 });
+    const currentStatus = vehicle.status;
     const clientRow = await prisma.client.findFirst({ where: { id: Number(clientId), ...req.tenantWhere() }, select: { id: true } });
     if (!clientRow) return res.status(404).json({ message: 'Client introuvable', statusCode: 404 });
     const priceSale = Number(vehicle.priceSale);
@@ -168,6 +173,17 @@ router.post('/', authorize('invoices', 'create'), async (req, res) => {
       issuedAt: created.createdAt,
       label: `Vente ${invoice_number}`,
     });
+
+    // La facture est ce qui rend le véhicule vendu. Personne ne posait ce
+    // statut : il fallait y penser à la main sur la fiche, et on n'y pensait
+    // pas — d'où des véhicules facturés qui restaient « en vente » dans le
+    // stock. LIVRE est terminal et n'est jamais rétrogradé ici.
+    if (currentStatus !== 'LIVRE') {
+      await prisma.vehicle.update({
+        where: { id: Number(vehicleId) },
+        data: { status: 'VENDU' },
+      });
+    }
 
     const { client, vehicle: veh, ...rest } = created;
     return res.status(201).json({
@@ -279,8 +295,9 @@ router.get('/:id/pdf', authorize('invoices', 'read'), async (req, res) => {
     }
 
     const paid = receipts.reduce((s, r) => s + Number(r.amount || 0), 0);
-    const priceSale = Number(invoice.vehicle?.priceSale) || Number(invoice.totalAmount) || 0;
-    const totalAmount = priceSale > 0 ? priceSale : Number(invoice.totalAmount) || 0;
+    // Le PDF est une pièce remise au client : il porte le montant facturé, pas
+    // le prix affiché aujourd'hui sur la fiche du véhicule.
+    const totalAmount = Number(invoice.totalAmount) || 0;
 
     const data = {
       kind: 'FACTURE',

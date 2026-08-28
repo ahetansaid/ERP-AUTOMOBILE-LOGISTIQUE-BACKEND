@@ -17,6 +17,18 @@ const STEPS_ORDER = [
   'LIVRE',
 ];
 
+/*
+ * Les deux sorties partagent cette table, mais PAS cette chaîne.
+ *
+ * Elles ne sont pas des étapes d'import : elles n'ont pas de rang, on ne les
+ * « avance » pas, et elles figent un solde que ce routeur ne sait pas calculer.
+ * Elles s'écrivent donc exclusivement par POST /sorties/atelier et
+ * /sorties/livraison. Les nommer ici sert à les AFFICHER dans la chronologie et
+ * à les EXCLURE de l'avancement — pas à les créer.
+ */
+const { SORTIE_ATELIER, LIVRAISON_CLIENT } = require('../lib/sorties');
+const JALONS_SORTIE = [SORTIE_ATELIER, LIVRAISON_CLIENT];
+
 const STEP_LABEL = {
   ARRIVEE_PORT: 'Arrivée au port',
   ADMISSION_TEMPORAIRE: 'Admission temporaire',
@@ -25,7 +37,22 @@ const STEP_LABEL = {
   SCELLES_POSES: 'Scellés posés',
   EN_ACHEMINEMENT: 'En acheminement',
   LIVRE: 'Livré',
+  [SORTIE_ATELIER]: "Sortie d'atelier",
+  [LIVRAISON_CLIENT]: 'Livraison au client',
 };
+
+/** Refus commun aux deux écritures manuelles d'étape. */
+function refusJalonDeSortie(res, stepName) {
+  if (!JALONS_SORTIE.includes(stepName)) return false;
+  res.status(409).json({
+    message:
+      `« ${STEP_LABEL[stepName]} » ne se saisit pas ici : cette sortie fige le solde ` +
+      'restant du jour, et ce solde serait perdu. Utilisez ' +
+      `POST /sorties/${stepName === SORTIE_ATELIER ? 'atelier' : 'livraison'}.`,
+    statusCode: 409,
+  });
+  return true;
+}
 
 function toDateOnly(d) {
   if (!d) return null;
@@ -35,16 +62,12 @@ function toDateOnly(d) {
 // GET /transit/steps/summary — compte par étape (scope tenant)
 router.get('/steps/summary', authorize('transit', 'read'), async (req, res) => {
   try {
-    const companyId = req.companyId ?? req.user?.companyId ?? null;
     const result = [];
+    // Le filtre societe est injecte par l'extension Prisma depuis que la table
+    // porte company_id : le compte est deja restreint au tenant courant.
     for (const step of STEPS_ORDER) {
       try {
-        const count = await prisma.transitStep.count({
-          where: {
-            stepName: step,
-            ...(companyId ? { vehicle: { is: { companyId: Number(companyId) } } } : {}),
-          },
-        });
+        const count = await prisma.transitStep.count({ where: { stepName: step } });
         result.push({ step, label: STEP_LABEL[step] ?? step, count });
       } catch (_) {
         result.push({ step, label: STEP_LABEL[step] ?? step, count: 0 });
@@ -60,21 +83,15 @@ router.get('/steps/summary', authorize('transit', 'read'), async (req, res) => {
 // GET /transit/steps — liste complète avec infos véhicule (scope tenant)
 router.get('/steps', authorize('transit', 'read'), async (req, res) => {
   try {
-    const companyId = req.companyId ?? req.user?.companyId ?? null;
     const vehicleId = req.query.vehicleId ? Number(req.query.vehicleId) : null;
 
+    // L'isolation n'est plus écrite ici : `transit_steps` porte désormais une
+    // colonne `company_id`, ce qui suffit à la faire entrer dans TENANT_MODELS
+    // et à faire injecter le filtre par l'extension Prisma, sur cette requête
+    // comme sur toutes les autres. Le filtre manuel qui traversait la relation
+    // véhicule était un oubli possible de plus.
     const where = {};
     if (vehicleId) where.vehicleId = vehicleId;
-    if (companyId) {
-      // Équivalent du LEFT JOIN + (v.company_id = ? OR v.company_id IS NULL) :
-      // étapes sans véhicule, ou dont le véhicule appartient à la société, ou
-      // dont le véhicule n'a pas de société.
-      where.OR = [
-        { vehicleId: null },
-        { vehicle: { is: { companyId: Number(companyId) } } },
-        { vehicle: { is: { companyId: null } } },
-      ];
-    }
 
     const rows = await prisma.transitStep.findMany({
       where,
@@ -96,6 +113,9 @@ router.get('/steps', authorize('transit', 'read'), async (req, res) => {
       const { vehicle, ...rest } = ts;
       return {
         ...toSnake(rest),
+        // Le libelle est calcule ici, pas dans le front : une seconde table de
+        // correspondance cote client divergerait des le prochain jalon ajoute.
+        label: STEP_LABEL[ts.stepName] ?? ts.stepName,
         vin: vehicle?.vin ?? null,
         brand: vehicle?.brand ?? null,
         model: vehicle?.model ?? null,
@@ -123,6 +143,7 @@ router.post('/steps', authorize('transit', 'create'), async (req, res) => {
     if (!Number.isInteger(vehicleId) || !stepName) {
       return res.status(400).json({ message: 'vehicleId et stepName requis', statusCode: 400 });
     }
+    if (refusJalonDeSortie(res, stepName)) return undefined;
     if (!STEPS_ORDER.includes(stepName)) {
       return res.status(400).json({
         message: `stepName invalide. Valeurs : ${STEPS_ORDER.join(', ')}`,
@@ -175,6 +196,7 @@ router.patch('/steps/:id', authorize('transit', 'update'), async (req, res) => {
 
     if (body.stepName !== undefined || body.step_name !== undefined) {
       const v = String(body.stepName ?? body.step_name ?? '').trim();
+      if (refusJalonDeSortie(res, v)) return undefined;
       if (!STEPS_ORDER.includes(v)) {
         return res.status(400).json({
           message: `stepName invalide. Valeurs : ${STEPS_ORDER.join(', ')}`,
@@ -200,6 +222,11 @@ router.patch('/steps/:id', authorize('transit', 'update'), async (req, res) => {
     if (!existing) {
       return res.status(404).json({ message: 'Étape introuvable', statusCode: 404 });
     }
+    // Une sortie déjà franchie ne se retouche pas : sa date et son solde figé
+    // sont ce qui atteste de la régularité de l'opération. Corriger l'un sans
+    // l'autre les rendrait incohérents, et les corriger tous deux reviendrait à
+    // réécrire l'histoire — ce que le grand livre interdit déjà par ailleurs.
+    if (refusJalonDeSortie(res, existing.stepName)) return undefined;
 
     const updated = await prisma.transitStep.update({ where: { id }, data });
 
@@ -228,8 +255,11 @@ router.post('/steps/advance', authorize('transit', 'update'), async (req, res) =
       return res.status(400).json({ message: 'vehicleId requis', statusCode: 400 });
     }
 
+    // Les jalons de sortie partagent la table mais pas la chaîne : une sortie
+    // d'atelier posée après la mainlevée deviendrait « l'étape courante » et
+    // l'avancement se bloquerait sur une étape qu'il ne sait pas situer.
     const last = await prisma.transitStep.findFirst({
-      where: { vehicleId },
+      where: { vehicleId, stepName: { in: STEPS_ORDER } },
       orderBy: { id: 'desc' },
       select: { stepName: true },
     });

@@ -17,6 +17,7 @@
 const { prisma } = require('./prisma');
 const { COST_NATURES } = require('./ledger');
 const { NON_ARCHIVES } = require('./archive');
+const { SORTIE_ATELIER, LIVRAISON_CLIENT } = require('./sorties');
 
 const num = (v) => (v == null ? 0 : Number(v));
 const daysBetween = (a, b) => Math.floor((a - b) / 86400000);
@@ -265,6 +266,139 @@ async function tauxIncoherent() {
     });
 }
 
+/* ── Sorties ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Véhicule livré avec un solde impayé, et toujours impayé N jours après.
+ *
+ * La porte de livraison s'ouvre volontairement sur une facture non soldée — le
+ * refuser ferait contourner le logiciel. Mais le solde figé au franchissement
+ * devient alors une créance qui doit rentrer. Sans cette règle, la dérogation
+ * consentie un mardi n'est plus jamais regardée.
+ */
+async function livraisonNonSoldee({ jours = 30 } = {}) {
+  const limite = new Date();
+  limite.setDate(limite.getDate() - jours);
+
+  const sorties = await prisma.transitStep.findMany({
+    where: {
+      stepName: LIVRAISON_CLIENT,
+      soldeGele: { gt: 0 },
+      dateArrival: { lt: limite },
+    },
+    select: { vehicleId: true, dateArrival: true, soldeGele: true, motif: true },
+    take: 200,
+  });
+  if (!sorties.length) return [];
+
+  const ids = sorties.map((s) => s.vehicleId).filter((v) => v != null);
+  const factures = await prisma.invoice.findMany({
+    where: { vehicleId: { in: ids } },
+    select: {
+      id: true,
+      vehicleId: true,
+      invoiceNumber: true,
+      totalAmount: true,
+      status: true,
+      receipts: { select: { amount: true } },
+    },
+  });
+  const parVehicule = new Map(factures.map((f) => [f.vehicleId, f]));
+
+  const constats = [];
+  for (const sortie of sorties) {
+    const facture = parVehicule.get(sortie.vehicleId);
+    if (!facture || facture.status === 'ANNULEE') continue;
+
+    // Le solde d'AUJOURD'HUI, pas celui du jour de la sortie : entre-temps le
+    // client a pu payer, et l'alerte doit alors se taire d'elle-même.
+    const paye = facture.receipts.reduce((s, r) => s + num(r.amount), 0);
+    const restant = num(facture.totalAmount) - paye;
+    if (restant <= 0) continue;
+
+    const age = daysBetween(new Date(), sortie.dateArrival);
+    constats.push({
+      entityType: 'Vehicle',
+      entityId: sortie.vehicleId,
+      title: `Véhicule livré depuis ${age} jours, ${Math.round(restant).toLocaleString('fr-FR')} F toujours dus`,
+      detail:
+        `Facture ${facture.invoiceNumber ?? facture.id}. ` +
+        `Solde à la livraison : ${Math.round(num(sortie.soldeGele)).toLocaleString('fr-FR')} F. ` +
+        (sortie.motif ? `Motif invoqué : « ${sortie.motif} ».` : 'Aucun motif enregistré.'),
+      value: restant,
+    });
+  }
+  return constats;
+}
+
+/**
+ * Dépense d'atelier postérieure à la sortie d'atelier du véhicule.
+ *
+ * Deux lectures, toutes deux à traiter : ou bien le prestataire a été payé
+ * après coup — et le coût de revient figé à la sortie était faux ; ou bien le
+ * véhicule est reparti à l'atelier sans que personne ne l'enregistre. Dans les
+ * deux cas, la marge annoncée sur ce véhicule n'est pas celle qu'on croit.
+ */
+async function preparationApresSortie({ toleranceJours = 2 } = {}) {
+  const sorties = await prisma.transitStep.findMany({
+    where: { stepName: SORTIE_ATELIER, vehicleId: { not: null } },
+    select: { vehicleId: true, dateArrival: true },
+    take: 300,
+  });
+  if (!sorties.length) return [];
+
+  // La plus ANCIENNE sortie par véhicule : la table en garantit une seule, mais
+  // s'appuyer sur cette garantie ici la rendrait fragile au premier assouplissement.
+  const sortieDe = new Map();
+  for (const s of sorties) {
+    const actuelle = sortieDe.get(s.vehicleId);
+    if (!actuelle || s.dateArrival < actuelle) sortieDe.set(s.vehicleId, s.dateArrival);
+  }
+
+  const ecritures = await prisma.ledgerEntry.findMany({
+    where: {
+      nature: 'PREPARATION',
+      reversesId: null,
+      vehicleId: { in: [...sortieDe.keys()] },
+    },
+    select: {
+      vehicleId: true,
+      entryDate: true,
+      amountFcfa: true,
+      label: true,
+      vehicle: { select: { vin: true, brand: true, model: true } },
+    },
+  });
+
+  const parVehicule = new Map();
+  for (const e of ecritures) {
+    const sortie = sortieDe.get(e.vehicleId);
+    if (!sortie) continue;
+    // Une facture d'atelier réglée le lendemain de la sortie est normale ; ce
+    // qu'on cherche, ce sont les dépenses qui arrivent bien après.
+    const ecart = daysBetween(e.entryDate, sortie);
+    if (ecart <= toleranceJours) continue;
+
+    if (!parVehicule.has(e.vehicleId)) {
+      parVehicule.set(e.vehicleId, { montant: 0, lignes: 0, vehicle: e.vehicle, ecartMax: 0 });
+    }
+    const agg = parVehicule.get(e.vehicleId);
+    agg.montant += Math.abs(num(e.amountFcfa));
+    agg.lignes += 1;
+    agg.ecartMax = Math.max(agg.ecartMax, ecart);
+  }
+
+  return [...parVehicule.entries()].map(([vehicleId, agg]) => ({
+    entityType: 'Vehicle',
+    entityId: vehicleId,
+    title: `${[agg.vehicle?.brand, agg.vehicle?.model].filter(Boolean).join(' ') || `Véhicule #${vehicleId}`} : ${Math.round(agg.montant).toLocaleString('fr-FR')} F d'atelier après sa sortie`,
+    detail:
+      `VIN ${agg.vehicle?.vin ?? '—'}. ${agg.lignes} écriture(s), jusqu'à ${agg.ecartMax} jours après la sortie d'atelier. ` +
+      "Soit le coût de revient figé à la sortie était incomplet, soit le véhicule est retourné à l'atelier sans être enregistré.",
+    value: agg.montant,
+  }));
+}
+
 /* ── Registre ─────────────────────────────────────────────────────────────── */
 
 const RULES = {
@@ -321,6 +455,18 @@ const RULES = {
     severity: 'CRITIQUE',
     params: {},
     run: tauxIncoherent,
+  },
+  LIVRAISON_NON_SOLDEE: {
+    label: 'Véhicule livré avec un solde impayé',
+    severity: 'CRITIQUE',
+    params: { jours: 30 },
+    run: livraisonNonSoldee,
+  },
+  PREPARATION_APRES_SORTIE: {
+    label: "Dépense d'atelier après la sortie d'atelier",
+    severity: 'ALERTE',
+    params: { toleranceJours: 2 },
+    run: preparationApresSortie,
   },
 };
 
