@@ -274,6 +274,7 @@ router.get('/:id/pdf', authorize('invoices', 'read'), async (req, res) => {
     }
 
     const { renderDocumentPdf } = require('../pdf/render');
+    const { identiteEmetteur } = require('../lib/identite');
 
     const [invoice, receipts] = await Promise.all([
       prisma.invoice.findFirst({
@@ -299,6 +300,8 @@ router.get('/:id/pdf', authorize('invoices', 'read'), async (req, res) => {
     // le prix affiché aujourd'hui sur la fiche du véhicule.
     const totalAmount = Number(invoice.totalAmount) || 0;
 
+    const emetteur = await identiteEmetteur(invoice.company);
+
     const data = {
       kind: 'FACTURE',
       number: invoice.invoiceNumber,
@@ -321,15 +324,11 @@ router.get('/:id/pdf', authorize('invoices', 'read'), async (req, res) => {
           total: totalAmount,
         },
       ],
-      from: {
-        name: invoice.company?.name || 'ParcAuto Manager',
-        address: invoice.company?.address || undefined,
-        city: invoice.company?.country ? undefined : undefined,
-        country: invoice.company?.country || undefined,
-        phone: invoice.company?.phone || undefined,
-        email: invoice.company?.email || undefined,
-        legalNumber: invoice.company?.legalNumber || undefined,
-      },
+      // `from` et `brand` viennent de lib/identite.js, qui resout aussi le logo
+      // en data URI. Les reunir la plutot qu'ici tient a ce qui vient : les
+      // recus et les devis auront le meme bloc emetteur, et c'est en le
+      // recopiant une deuxieme fois qu'on le ferait diverger.
+      ...emetteur,
       to: {
         name: invoice.client?.name || 'Client',
         address: invoice.client?.address || undefined,
@@ -337,10 +336,6 @@ router.get('/:id/pdf', authorize('invoices', 'read'), async (req, res) => {
         country: invoice.client?.country || undefined,
         phone: invoice.client?.phone || undefined,
         email: invoice.client?.email || undefined,
-      },
-      brand: {
-        name: invoice.company?.name,
-        color: invoice.company?.primaryColor || '#6366F1',
       },
       notes:
         paid > 0 && paid < totalAmount

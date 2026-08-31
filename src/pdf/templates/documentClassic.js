@@ -7,7 +7,7 @@
  */
 
 const React = require('react');
-const { Document, Page, View, Text, StyleSheet } = require('@react-pdf/renderer');
+const { Document, Page, View, Text, Image, StyleSheet } = require('@react-pdf/renderer');
 const {
   KIND_LABEL, fmtAmount, fmtNumber, fmtDate, computeTotals, footerNote,
 } = require('./_shared');
@@ -22,6 +22,9 @@ const s = StyleSheet.create({
 
   head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   logoBox: { width: 46, height: 46, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
+  // objectFit 'contain' : un logo carre comme un logo large gardent leurs
+  // proportions. Sans lui, react-pdf etire l'image sur la boite.
+  logoImg: { width: 46, height: 46, objectFit: 'contain' },
   logoText: { color: '#fff', fontFamily: 'Helvetica-Bold', fontSize: 18 },
   issuer: { marginTop: 8, fontFamily: 'Helvetica-Bold', fontSize: 11 },
   issuerLine: { fontSize: 8.5, color: MUTED, marginTop: 1.5 },
@@ -82,6 +85,9 @@ function buildDocumentClassic(data) {
   const currency = data.currency || 'FCFA';
   const { lines, subtotal, vatRate, vat, total } = computeTotals(data);
   const brandName = (data.brand && data.brand.name) || data.from.name;
+  // Data URI produit par lib/identite.js : le rendu est cote serveur, sans
+  // session, il ne peut donc pas aller chercher une URL protegee par cookie.
+  const logo = (data.brand && data.brand.logo) || null;
   const note = footerNote(data);
 
   return e(
@@ -90,8 +96,13 @@ function buildDocumentClassic(data) {
 
       e(View, { style: s.head },
         e(View, { style: { flex: 1 } },
-          e(View, { style: [s.logoBox, { backgroundColor: accent }] },
-            e(Text, { style: s.logoText }, (brandName || '?')[0])),
+          // Le vrai logo s'il existe, sinon l'initiale dans un carre accentue.
+          // Le repli n'est pas un pis-aller : une societe qui n'a pas encore
+          // depose son logo doit quand meme pouvoir emettre une facture.
+          logo
+            ? e(Image, { src: logo, style: s.logoImg })
+            : e(View, { style: [s.logoBox, { backgroundColor: accent }] },
+                e(Text, { style: s.logoText }, (brandName || '?')[0])),
           e(Text, { style: s.issuer }, brandName),
           data.from.address ? e(Text, { style: s.issuerLine }, data.from.address) : null,
           e(Text, { style: s.issuerLine },

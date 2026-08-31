@@ -10,7 +10,7 @@
  */
 
 const React = require('react');
-const { Document, Page, View, Text, StyleSheet } = require('@react-pdf/renderer');
+const { Document, Page, View, Text, Image, StyleSheet } = require('@react-pdf/renderer');
 const { KIND_LABEL, fmtAmount, fmtDate, computeTotals, footerNote } = require('./_shared');
 
 const e = React.createElement;
@@ -27,6 +27,7 @@ const s = StyleSheet.create({
   head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   logoBox: { width: 36, height: 36, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
+  logoImg: { width: 36, height: 36, objectFit: 'contain' },
   logoText: { color: '#fff', fontFamily: 'Helvetica-Bold', fontSize: 15 },
   brandName: { fontFamily: 'Helvetica-Bold', fontSize: 11 },
   brandSub: { fontSize: 8, color: MUTED, marginTop: 1 },
@@ -83,6 +84,9 @@ function buildDocumentGradient(data) {
   const currency = data.currency || 'FCFA';
   const { lines, subtotal, vatRate, vat, total } = computeTotals(data);
   const brandName = (data.brand && data.brand.name) || data.from.name;
+  // Data URI produit par lib/identite.js : le rendu est cote serveur, sans
+  // session, il ne peut donc pas aller chercher une URL protegee par cookie.
+  const logo = (data.brand && data.brand.logo) || null;
   const note = footerNote(data);
 
   // Dégradé simulé : 6 segments d'opacité décroissante.
@@ -98,8 +102,10 @@ function buildDocumentGradient(data) {
 
         e(View, { style: s.head },
           e(View, { style: s.brandRow },
-            e(View, { style: [s.logoBox, { backgroundColor: accent }] },
-              e(Text, { style: s.logoText }, (brandName || '?')[0])),
+            logo
+              ? e(Image, { src: logo, style: s.logoImg })
+              : e(View, { style: [s.logoBox, { backgroundColor: accent }] },
+                  e(Text, { style: s.logoText }, (brandName || '?')[0])),
             e(View, null,
               e(Text, { style: s.brandName }, brandName),
               e(Text, { style: s.brandSub },
