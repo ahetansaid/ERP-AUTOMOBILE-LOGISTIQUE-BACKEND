@@ -30,6 +30,7 @@ const alertesRoutes = require('./routes/alertes');
 const fraisRoutes = require('./routes/purchaseCosts');
 const installationRoutes = require('./routes/installation');
 const cronRoutes = require('./routes/cron');
+const comptabiliteRoutes = require('./routes/comptabilite');
 const { authMiddleware, downloadTokenBridge } = require('./middleware/auth');
 const { tenantScope } = require('./middleware/tenant');
 const { attachAudit } = require('./middleware/audit');
@@ -143,6 +144,7 @@ mount('/api');
 // utilisateur mais la plateforme de cron, qui s'authentifie par CRON_SECRET.
 // Montée sur les deux préfixes comme le reste, pour que la configuration Vercel
 // fonctionne quel que soit le chemin retenu.
+app.use('/comptabilite', comptabiliteRoutes);
 app.use('/cron', cronRoutes);
 app.use('/api/cron', cronRoutes);
 

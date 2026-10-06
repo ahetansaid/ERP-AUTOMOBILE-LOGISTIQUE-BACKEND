@@ -8,6 +8,23 @@ const importVehicules = require('../lib/importVehicules');
 
 const router = express.Router();
 
+/**
+ * GET /vehicles/age-stock — le capital immobilise, par tranche d'anciennete.
+ *
+ * Declaree ici, avant toute route parametree : `/:id` l'avalerait sinon, et
+ * Number('age-stock') donnerait NaN. Le piege s'est deja referme une fois sur
+ * l'export.
+ */
+router.get('/age-stock', authorize('vehicles', 'read'), async (req, res) => {
+  try {
+    const { ageDuStock } = require('../lib/ageStock');
+    return res.status(200).json(await ageDuStock());
+  } catch (e) {
+    console.error('[vehicles.ageStock]', e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
 // Helpers ------------------------------------------------------------------
 
 function toNumber(v) {
