@@ -24,6 +24,8 @@ const SENSITIVE_KEYS = new Set([
   'refresh_token',
   'two_fa_secret',
   'jwt',
+  'mecefToken',
+  'mecef_token',
 ]);
 
 function sanitize(value) {

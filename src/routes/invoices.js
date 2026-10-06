@@ -4,6 +4,7 @@ const { toSnake } = require('../lib/serialize');
 const { nextDocumentNumber } = require('../lib/numbering');
 const ledgerBridge = require('../services/ledgerBridge');
 const { authorize } = require('../middleware/rbac');
+const { notify } = require('../services/notifications');
 // @react-pdf/renderer est lourd : on le charge paresseusement (require dans le
 // handler PDF) pour ne pas l'embarquer dans le démarrage à froid serverless.
 const router = express.Router();
@@ -242,6 +243,152 @@ router.patch('/:id', authorize('invoices', 'update'), async (req, res) => {
     });
   } catch (e) {
     console.error(e);
+    return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
+  }
+});
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * NORMALISATION FISCALE — e-MECeF, DGI Benin
+ *
+ * Au Benin, une facture de vente non certifiee n'est pas opposable. La
+ * plateforme ne certifie pas : elle transmet a la DGI, recoit un code et un QR,
+ * et les conserve. Ce qui suit est le seul chemin par lequel une facture de ce
+ * produit devient une piece fiscale valide.
+ *
+ * TROIS GARDE-FOUS, ET AUCUN N'EST DU CONFORT
+ *
+ *   · une facture deja normalisee n'est jamais renvoyee — ce serait une
+ *     seconde declaration pour une seule vente ;
+ *   · l'uid DGI est persiste AVANT la confirmation, pour qu'une coupure
+ *     laisse une trace retrouvable au lieu d'un trou ;
+ *   · un echec est ECRIT sur la facture, pas seulement journalise : si
+ *     personne ne voit l'echec, personne ne reessaie.
+ * ══════════════════════════════════════════════════════════════════════════ */
+router.post('/:id/normaliser', authorize('invoices', 'update'), async (req, res) => {
+  const { construireCharge, normaliser } = require('../lib/mecef');
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'ID invalide', statusCode: 400 });
+    }
+
+    const facture = await prisma.invoice.findFirst({
+      where: { id, ...req.tenantWhere() },
+      include: {
+        client: { select: { name: true } },
+        vehicle: { select: { vin: true, brand: true, model: true } },
+        company: true,
+      },
+    });
+    if (!facture) return res.status(404).json({ message: 'Facture introuvable', statusCode: 404 });
+
+    if (facture.mecefStatus === 'NORMALISEE') {
+      return res.status(409).json({
+        message: 'Cette facture est deja normalisee. Une seconde declaration serait une fraude.',
+        statusCode: 409,
+        code: 'DEJA_NORMALISEE',
+        mecef_code: facture.mecefCode,
+      });
+    }
+    if (facture.status === 'ANNULEE') {
+      return res.status(409).json({
+        message: 'Une facture annulee ne se normalise pas.',
+        statusCode: 409,
+      });
+    }
+    if (facture.mecefUid) {
+      // Creee chez la DGI mais non confirmee : la renvoyer creerait un doublon.
+      return res.status(409).json({
+        message:
+          'Une declaration est deja ouverte chez la DGI pour cette facture ' +
+          `(identifiant ${facture.mecefUid}) sans avoir ete confirmee. ` +
+          'Verifiez son etat chez la DGI avant toute nouvelle tentative.',
+        statusCode: 409,
+        code: 'DECLARATION_EN_ATTENTE',
+        mecef_uid: facture.mecefUid,
+      });
+    }
+
+    const c = facture.company;
+    const config = {
+      token: c?.mecefToken,
+      baseUrl: c?.mecefBaseUrl || undefined,
+    };
+
+    const charge = construireCharge({
+      ifu: c?.legalNumber,
+      typeFacture: c?.mecefInvoiceType || 'FV',
+      groupeTaxe: c?.mecefTaxGroup,
+      operateur: req.user?.name || c?.name,
+      client: facture.client ? { name: facture.client.name } : null,
+      vehicule: facture.vehicle,
+      montantTotal: facture.totalAmount,
+    });
+
+    // Fige ce qui part, AVANT qu'il parte.
+    await prisma.invoice.update({
+      where: { id },
+      data: { mecefPayload: charge, mecefError: null },
+    });
+
+    const resultat = await normaliser(config, charge, async (uid) => {
+      await prisma.invoice.update({
+        where: { id },
+        data: { mecefUid: uid, mecefStatus: 'EN_ATTENTE' },
+      });
+    });
+
+    await prisma.invoice.update({
+      where: { id },
+      data: {
+        mecefStatus: 'NORMALISEE',
+        mecefCode: resultat.code,
+        mecefQrCode: resultat.qrCode,
+        mecefAt: new Date(),
+        mecefError: null,
+      },
+    });
+
+    notify({
+      companyId: req.companyId ?? null,
+      type: 'SUCCESS',
+      title: 'Facture normalisee',
+      message: `Facture ${facture.invoiceNumber} certifiee par la DGI (${resultat.code}).`,
+      link: `/comptabilite/factures/${id}`,
+      audience: 'admins',
+    });
+
+    return res.status(200).json({
+      mecef_status: 'NORMALISEE',
+      mecef_uid: resultat.uid,
+      mecef_code: resultat.code,
+      mecef_qr_code: resultat.qrCode,
+    });
+  } catch (err) {
+    // L'echec s'ecrit sur la facture : un echec que personne ne voit est un
+    // echec que personne ne rattrape.
+    const estMecef = err && err.name === 'ErreurMecef';
+    try {
+      await prisma.invoice.update({
+        where: { id: Number(req.params.id) },
+        data: {
+          mecefError: String(err.message || 'echec').slice(0, 1000),
+          // DELAI_DEPASSE laisse EN_ATTENTE : la declaration est peut-etre
+          // passee. La marquer en echec inviterait a la renvoyer.
+          ...(err.code === 'DELAI_DEPASSE' ? {} : { mecefStatus: 'ECHEC' }),
+        },
+      });
+    } catch { /* la facture a pu disparaitre entre-temps */ }
+
+    if (estMecef) {
+      return res.status(502).json({
+        message: err.message,
+        statusCode: 502,
+        code: err.code ?? null,
+      });
+    }
+    console.error('[invoices.normaliser]', err);
     return res.status(500).json({ message: 'Erreur serveur', statusCode: 500 });
   }
 });

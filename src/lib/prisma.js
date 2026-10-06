@@ -99,6 +99,9 @@ const ACTION_BY_OP = {
 const SENSITIVE = new Set([
   'password', 'passwordHash', 'password_hash', 'token', 'refreshToken',
   'refresh_token', 'twoFaSecret', 'two_fa_secret', 'jwt',
+  // Jeton DGI : il autorise a declarer au nom de la societe. Au meme rang
+  // qu'un mot de passe, et pour la meme raison.
+  'mecefToken', 'mecef_token',
 ]);
 
 function sanitize(value, depth = 0) {

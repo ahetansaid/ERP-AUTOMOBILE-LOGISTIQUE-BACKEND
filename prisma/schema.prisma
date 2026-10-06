@@ -194,6 +194,18 @@ enum PartnerKind {
 
 /// Cycle de vie d'un rapport. La diffusion n'intervient qu'après approbation :
 /// un rapport non relu ne part pas.
+/// Etat de normalisation fiscale d'une facture (e-MECeF, DGI Benin).
+/// A_NORMALISER est l'etat de depart ; EN_ATTENTE signifie qu'un identifiant
+/// DGI existe mais que la confirmation n'a pas abouti — c'est l'etat qu'il
+/// faut pouvoir rattraper, pas effacer.
+enum MecefStatus {
+  A_NORMALISER
+  EN_ATTENTE
+  NORMALISEE
+  ANNULEE
+  ECHEC
+}
+
 enum ReportStatus {
   GENERE
   EN_REVUE
@@ -278,6 +290,13 @@ model Company {
   legalNumber     String?   @map("legal_number") @db.VarChar(100) // IFU / RCCM
   country         String?   @db.VarChar(100)
   defaultCurrency String?   @map("default_currency") @db.VarChar(10)
+  /// SECRET. Jamais renvoye par l'API (ecriture seule), masque dans l'audit
+  /// au meme titre qu'un mot de passe.
+  mecefToken      String?   @map("mecef_token") @db.Text
+  mecefBaseUrl    String?   @map("mecef_base_url") @db.VarChar(255)
+  /// Groupe de taxation DGI. Jamais devine : il fixe le taux de TVA.
+  mecefTaxGroup   String?   @map("mecef_tax_group") @db.VarChar(10)
+  mecefInvoiceType String?  @map("mecef_invoice_type") @db.VarChar(10)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime? @updatedAt @map("updated_at")
 
@@ -638,6 +657,22 @@ model Invoice {
   invoiceNumber String        @map("invoice_number") @db.VarChar(50)
   dueDate       DateTime?     @map("due_date") @db.Date
   status        InvoiceStatus @default(EMISE)
+
+  // ── Normalisation fiscale ────────────────────────────────────────────────
+  /// La plateforme ne certifie pas : elle transmet et conserve la preuve.
+  mecefStatus  MecefStatus @default(A_NORMALISER) @map("mecef_status")
+  /// Identifiant DGI, ecrit AVANT la confirmation : seule cle permettant de
+  /// retrouver la facture si la liaison se coupe entre les deux appels.
+  mecefUid     String?     @map("mecef_uid") @db.VarChar(100)
+  /// Code renvoye par la DGI. C'est lui qui fait foi.
+  mecefCode    String?     @map("mecef_code") @db.VarChar(255)
+  mecefQrCode  String?     @map("mecef_qr_code") @db.Text
+  mecefAt      DateTime?   @map("mecef_at")
+  /// Ce qui a ete ENVOYE, fige. En controle, la question est « qu'avez-vous
+  /// declare », pas « qu'affiche votre ecran aujourd'hui ».
+  mecefPayload Json?       @map("mecef_payload") @db.JsonB
+  mecefError   String?     @map("mecef_error") @db.VarChar(1000)
+
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime?     @updatedAt @map("updated_at")
 
@@ -647,6 +682,7 @@ model Invoice {
   receipts Receipt[]
 
   @@unique([companyId, invoiceNumber], map: "uk_invoices_company_number")
+  @@index([companyId, mecefStatus], map: "idx_invoices_mecef_status")
   @@index([companyId], map: "idx_invoices_company")
   @@index([vehicleId], map: "idx_invoices_vehicle")
   @@index([clientId], map: "idx_invoices_client")

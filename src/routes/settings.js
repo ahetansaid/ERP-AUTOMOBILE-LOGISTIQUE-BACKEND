@@ -46,6 +46,15 @@ const CHAMPS_IDENTITE = (c) => ({
   logo_apercu: idDepuisReference(c.logoUrl)
     ? `/uploads/${idDepuisReference(c.logoUrl)}/raw`
     : null,
+
+  // ── e-MECeF ───────────────────────────────────────────────────────────────
+  // Le JETON N'EST JAMAIS RENVOYE. Il autorise a declarer au nom de la societe
+  // aupres de la DGI : le relire par l'API en ferait un secret qui fuit a
+  // chaque chargement d'ecran. On renvoie seulement s'il est pose.
+  mecef_configure: Boolean(c.mecefToken),
+  mecef_base_url: c.mecefBaseUrl,
+  mecef_tax_group: c.mecefTaxGroup,
+  mecef_invoice_type: c.mecefInvoiceType,
 });
 
 router.get('/company', authorize('settings', 'read'), async (req, res) => {
@@ -152,6 +161,21 @@ router.put('/company', authorize('settings', 'update'), async (req, res) => {
         }
         data.logoUrl = `upload:${uploadId}`;
       }
+    }
+
+    // Le jeton DGI s'ecrit, ne se lit pas. Chaine vide = effacement explicite.
+    const jeton = b.mecef_token ?? b.mecefToken;
+    if (jeton !== undefined) {
+      const v = String(jeton ?? '').trim();
+      data.mecefToken = v || null;
+    }
+    for (const [cle, champ, max] of [
+      ['mecef_base_url', 'mecefBaseUrl', 255],
+      ['mecef_tax_group', 'mecefTaxGroup', 10],
+      ['mecef_invoice_type', 'mecefInvoiceType', 10],
+    ]) {
+      const v = texte(b[cle], max);
+      if (v !== undefined) data[champ] = v;
     }
 
     if (!Object.keys(data).length) {
