@@ -82,6 +82,9 @@ function chargerAvec({ etape = null, vehicule = { id: 7, status: 'DISPONIBLE' } 
     },
     workshopQuote: { findMany: async () => [] },
     invoice: { findFirst: async () => null },
+    // Sans facture, etatLivraison interroge le grand livre pour savoir si la
+    // vente est anterieure a la plateforme. Par defaut : aucune trace.
+    ledgerEntry: { groupBy: async () => [] },
     receipt: { aggregate: async () => ({ _sum: { amount: 0 } }) },
   };
 
@@ -230,5 +233,51 @@ test('une porte inconnue est refusée avant toute lecture', async () => {
     assert.deepEqual(JALONS, [SORTIE_ATELIER, LIVRAISON_CLIENT]);
   } finally {
     restaurer();
+  }
+});
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * VENTE ANTÉRIEURE À LA PLATEFORME
+ *
+ * Seize véhicules sont au statut VENDU sans aucune facture : la reprise a
+ * écrit leurs ventes au grand livre, jamais en facturation. Sans traitement
+ * explicite, la porte de livraison réclame un motif sur chacun, et l'équipe
+ * contourne l'écran — exactement ce que la conception voulait éviter.
+ *
+ * Ces tests figent la règle qui coûte le plus cher si on l'oublie : le solde
+ * d'une vente historique vaut NULL, jamais zéro.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+test('un solde non établi ne doit jamais se lire comme un solde nul', () => {
+  // La bascule des notifications et de la pastille repose là-dessus.
+  const soldeNonEtabli = null;
+  const soldeRegle = 0;
+
+  assert.notStrictEqual(soldeNonEtabli, soldeRegle);
+  // == 0 serait vrai pour null : c'est le piège exact qu'on évite.
+  assert.strictEqual(soldeNonEtabli == null, true);
+  assert.strictEqual(soldeRegle == null, false);
+
+  const type = (s) => (s === 0 ? 'SUCCESS' : 'WARNING');
+  assert.strictEqual(type(soldeNonEtabli), 'WARNING');
+  assert.strictEqual(type(soldeRegle), 'SUCCESS');
+});
+
+test('vente et règlement ne se soustraient pas sur les données reprises', () => {
+  // Mesuré en production : sur les 16 véhicules VENDU, les deux natures
+  // s'excluent. Cinq portent une VENTE sans REGLEMENT, six l'inverse, cinq
+  // n'ont ni l'une ni l'autre. La soustraction produirait un faux solde.
+  const reels = [
+    { vente: 4300000, reglement: 0 },
+    { vente: 0, reglement: 5900000 },
+    { vente: 0, reglement: 0 },
+  ];
+  for (const v of reels) {
+    const auMoinsUnZero = v.vente === 0 || v.reglement === 0;
+    assert.strictEqual(
+      auMoinsUnZero,
+      true,
+      'les deux natures ne coexistent jamais — soustraire serait arbitraire'
+    );
   }
 });

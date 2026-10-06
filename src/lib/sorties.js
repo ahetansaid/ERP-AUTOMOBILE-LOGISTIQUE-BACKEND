@@ -141,6 +141,45 @@ async function etatAtelier(vehicleId) {
 }
 
 /**
+ * Trace d'une vente au grand livre, pour un vehicule sans facture.
+ *
+ * POURQUOI ON NE SOUSTRAIT PAS
+ *
+ * On serait tente de rendre `vente - reglement` comme solde du. Sur les donnees
+ * reelles, ce calcul est FAUX : les deux natures s'excluent. Sur les seize
+ * vehicules au statut VENDU, cinq portent une VENTE sans aucun REGLEMENT, six
+ * portent un REGLEMENT sans aucune VENTE, et cinq n'ont ni l'une ni l'autre.
+ * La reprise a enregistre chaque dossier d'un cote OU de l'autre, jamais des
+ * deux — le couple reconnaissance / encaissement n'existait pas dans le
+ * classeur d'origine.
+ *
+ * Soustraire produirait donc 19,8 M de « restant du » sur cinq vehicules
+ * probablement payes, et zero sur six vehicules dont la vente n'a jamais ete
+ * reconnue. Un faux zero se lit « tout est paye » : c'est la pire des sorties.
+ *
+ * On rend donc les deux chiffres bruts, et la porte dit que le solde n'est pas
+ * etablissable. C'est moins confortable, et c'est vrai.
+ *
+ * @returns {{vente: number, reglement: number, lignes: number}|null}
+ */
+async function traceDeVente(vehicleId) {
+  const lignes = await prisma.ledgerEntry.groupBy({
+    by: ['nature'],
+    where: { vehicleId: Number(vehicleId), nature: { in: ['VENTE', 'REGLEMENT'] } },
+    _sum: { amountFcfa: true },
+    _count: { _all: true },
+  });
+  if (!lignes.length) return null;
+
+  const somme = (n) => Number(lignes.find((l) => l.nature === n)?._sum.amountFcfa ?? 0);
+  return {
+    vente: Math.abs(somme('VENTE')),
+    reglement: Math.abs(somme('REGLEMENT')),
+    lignes: lignes.reduce((t, l) => t + l._count._all, 0),
+  };
+}
+
+/**
  * État de la porte livraison.
  *
  * Un devis d'atelier encore ouvert est une RÉSERVE, pas un refus : le véhicule
@@ -171,9 +210,26 @@ async function etatLivraison(vehicleId) {
   let total = 0;
   let paye = 0;
   let restant = 0;
+  let historique = null;
 
   if (!facture) {
-    reserves.push("Aucune facture de vente — le véhicule sortirait sans être vendu");
+    // Pas de facture : le vehicule a-t-il quand meme ete vendu AVANT la mise en
+    // service de la plateforme ? La reprise d'historique a ecrit des VENTE et
+    // des REGLEMENT au grand livre sans jamais creer de facture.
+    historique = await traceDeVente(id);
+    if (historique) {
+      reserves.push(
+        `Vente anterieure a la plateforme : le grand livre porte ` +
+          `${Math.round(historique.vente).toLocaleString('fr-FR')} FCFA de VENTE et ` +
+          `${Math.round(historique.reglement).toLocaleString('fr-FR')} FCFA de REGLEMENT, ` +
+          `sans facture. Le solde ne peut pas etre etabli — joignez la piece papier.`
+      );
+      // RESTANT NUL, PAS ZERO. Voir traceDeVente : la soustraction donnerait un
+      // chiffre faux, et un faux zero se lirait « tout est paye ».
+      restant = null;
+    } else {
+      reserves.push("Aucune facture de vente — le vehicule sortirait sans etre vendu");
+    }
   } else if (facture.status === 'ANNULEE') {
     reserves.push('La facture de ce véhicule est annulée');
   } else {
@@ -194,6 +250,7 @@ async function etatLivraison(vehicleId) {
   return {
     porte: LIVRAISON_CLIENT,
     vehicule,
+    venteHistorique: historique,
     facture: facture
       ? {
           id: facture.id,
@@ -297,6 +354,7 @@ module.exports = {
   JALONS,
   DEVIS_CLOS,
   jourUTC,
+  traceDeVente,
   etatAtelier,
   etatLivraison,
   etatPorte,

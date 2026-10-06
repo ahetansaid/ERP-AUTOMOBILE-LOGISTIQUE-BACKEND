@@ -89,10 +89,13 @@ function monterPorte({ chemin, jalon, moduleRbac, etat, titreNotif, messageNotif
         });
       }
 
-      const solde = Number(resultat.etape.soldeGele) || 0;
+      // null n'est pas zero : il veut dire « solde non etablissable »
+      // (vente anterieure a la plateforme). Les confondre ferait annoncer
+      // « integralement regle » un dossier dont on ignore tout.
+      const solde = resultat.etape.soldeGele == null ? null : Number(resultat.etape.soldeGele);
       notify({
         companyId: req.companyId ?? null,
-        type: solde > 0 ? 'WARNING' : 'SUCCESS',
+        type: solde === 0 ? 'SUCCESS' : 'WARNING',
         title: titreNotif,
         message: messageNotif(vehicule, solde, resultat.etape),
         link: `/vehicules/${vehicleId}`,
@@ -102,6 +105,7 @@ function monterPorte({ chemin, jalon, moduleRbac, etat, titreNotif, messageNotif
       return res.status(201).json({
         ...toSnake(resultat.etape),
         solde_gele: solde,
+        vente_historique: resultat.etat.venteHistorique ?? null,
         reserves: resultat.etat.reserves,
       });
     } catch (e) {
@@ -129,10 +133,12 @@ monterPorte({
   moduleRbac: 'workshop_quotes',
   etat: etatAtelier,
   titreNotif: "Sortie d'atelier",
-  messageNotif: (v, solde) =>
-    solde > 0
+  messageNotif: (v, solde) => {
+    if (solde == null) return `${designation(v)} sorti d'atelier — solde atelier non établi.`;
+    return solde > 0
       ? `${designation(v)} sorti d'atelier avec ${fcfa(solde)} encore dus aux prestataires.`
-      : `${designation(v)} sorti d'atelier, tous les devis soldés.`,
+      : `${designation(v)} sorti d'atelier, tous les devis soldés.`;
+  },
 });
 
 monterPorte({
@@ -141,10 +147,14 @@ monterPorte({
   moduleRbac: 'invoices',
   etat: etatLivraison,
   titreNotif: 'Véhicule livré',
-  messageNotif: (v, solde) =>
-    solde > 0
+  messageNotif: (v, solde) => {
+    if (solde == null) {
+      return `${designation(v)} livré — vente antérieure à la plateforme, solde non établi.`;
+    }
+    return solde > 0
       ? `${designation(v)} livré avec un solde impayé de ${fcfa(solde)}.`
-      : `${designation(v)} livré, facture intégralement réglée.`,
+      : `${designation(v)} livré, facture intégralement réglée.`;
+  },
 });
 
 module.exports = router;
